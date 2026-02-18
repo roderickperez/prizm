@@ -1,0 +1,22 @@
+# User-requested binary/data exclusions
+*.png
+*.eps
+*.svg
+*.sgy
+*.segy
+*.npy
+
+# Environment and Python cache artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS/editor artifacts
+.DS_Store
+*.swp
+*.swo
+
+# Local logs and temp files
+*.log

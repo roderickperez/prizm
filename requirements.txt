@@ -1,0 +1,29 @@
+# Core scientific stack
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+psutil
+setuptools<81
+segyio
+
+# Visualization / dashboard
+panel
+holoviews
+bokeh
+
+# Domain-specific signal processing
+bruges
+EMD-signal
+
+# Deep learning (install GPU wheels via CUDA index in uv command)
+torch
+torchvision
+torchaudio
+
+# Internal dependency used by launchers/apps (install from your internal source)
+# cegalprizm
+
+# Optional dependency checked at runtime in GPU test module
+# cuda-python
