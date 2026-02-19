@@ -12,6 +12,8 @@ segyio
 panel
 holoviews
 bokeh
+hvplot
+xarray
 
 # Domain-specific signal processing
 bruges

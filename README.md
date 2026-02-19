@@ -171,6 +171,20 @@ http://localhost:5006/seismic_footprintSuppression_main
 
 ---
 
+### I) Structural Uncertainty
+
+```bash
+panel serve structuralUncertainty/pages/structuralUncertainty.py --autoreload --show --port 5006
+```
+
+URL:
+
+```text
+http://localhost:5006/structuralUncertainty
+```
+
+---
+
 ## 5) Optional: pass data file from terminal (if app expects `PWR_DATA_FILE`)
 
 Some apps read data from `PWR_DATA_FILE`.
