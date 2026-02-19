@@ -4,7 +4,6 @@ import os
 import platform
 import sys
 import time
-from functools import lru_cache
 from pathlib import Path
 
 import holoviews as hv
@@ -17,7 +16,6 @@ import xarray as xr
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from bokeh.models import HoverTool
-from scipy.ndimage import gaussian_filter, label
 
 
 # ==============================================================================
@@ -62,6 +60,19 @@ apply_dll_fix()
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+STRUCTURAL_DIR = ROOT_DIR / "structuralUncertainty"
+if str(STRUCTURAL_DIR) not in sys.path:
+    sys.path.insert(0, str(STRUCTURAL_DIR))
+
+from core.engine import (  # noqa: E402
+    build_surfaces as core_build_surfaces,
+    compute_trap_statistics as core_compute_trap_statistics,
+    extract_section_stack as core_extract_section_stack,
+    generate_velocity_depth_stacks as core_generate_velocity_depth_stacks,
+    get_trap_and_spill as core_get_trap_and_spill,
+    line_through_center as core_line_through_center,
+)
 
 try:
     from shared.ui.omv_theme import (
@@ -159,6 +170,7 @@ def setup_structural_logger(log_dir: Path, logger_name: str = "structural_uncert
 
 
 logger = setup_structural_logger(LOG_DIR)
+av_depth_tabs = None
 
 
 # ==============================================================================
@@ -207,7 +219,7 @@ custom_css = f"""
     display: flex;
     flex-direction: column;
     height: 100%;
-    gap: 6px;
+    gap: 12px;
 }}
 .hist-container .bk,
 .hist-container .bk-root,
@@ -250,241 +262,166 @@ slider_stylesheets = get_slider_stylesheets()
 # ==============================================================================
 #  SYNTHETIC INPUTS: TWT + DETERMINISTIC VELOCITY
 # ==============================================================================
-def create_synthetic_twt_and_velocity() -> tuple[xr.DataArray, xr.DataArray]:
-    x = np.linspace(0, 10000, 100)
-    y = np.linspace(0, 10000, 100)
-    x_grid, y_grid = np.meshgrid(x, y)
+x_values = np.linspace(0, 10000, 100)
+y_values = np.linspace(0, 10000, 100)
 
-    twt_ms = 4000 - 700 * np.exp(-(((x_grid - 5000) ** 2 + (y_grid - 5000) ** 2) / (2 * 2000 ** 2)))
-    vel_det = 3000 + 120 * np.exp(-(((x_grid - 6500) ** 2 + (y_grid - 4200) ** 2) / (2 * 3500 ** 2)))
+surface_state: dict[str, object] = {
+    "mode": "Synthetic TWT Input",
+    "token": 0,
+}
 
-    twt = xr.DataArray(twt_ms, coords=[y, x], dims=["y", "x"], name="TWT")
-    velocity = xr.DataArray(vel_det, coords=[y, x], dims=["y", "x"], name="Velocity")
-    return twt, velocity
-
-
-base_twt, base_velocity = create_synthetic_twt_and_velocity()
-y_section_value = 5000
-y_section_idx = int(np.abs(base_twt.y.values - y_section_value).argmin())
-deterministic_depth = (base_twt.values * base_velocity.values) / 2000.0
+stack_cache: dict[str, object] = {"key": None, "data": None}
+trap_cache: dict[str, object] = {"key": None, "data": None}
 
 
-# ==============================================================================
-#  GEOSTATISTICAL SIMULATION CORE
-# ==============================================================================
-@lru_cache(maxsize=24)
-def _covariance_grid(shape: tuple[int, int], dx: float, dy: float) -> tuple[np.ndarray, np.ndarray]:
-    ny, nx = shape
-    y = np.fft.fftfreq(ny, d=1.0 / ny) * dy * ny
-    x = np.fft.fftfreq(nx, d=1.0 / nx) * dx * nx
-    return np.meshgrid(x, y)
+def _initialize_surface_state() -> None:
+    twt_ms, vel = core_build_surfaces("Synthetic TWT Input", x_values, y_values)
+    surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_values, x_values], dims=["y", "x"], name="TWT")
+    surface_state["velocity"] = xr.DataArray(vel, coords=[y_values, x_values], dims=["y", "x"], name="Velocity")
 
 
-def generate_geostatistical_realization(
-    shape: tuple[int, int],
-    dx: float,
-    dy: float,
-    model: str,
-    range_val: float,
-    nugget: float,
-    sill: float,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    x_grid, y_grid = _covariance_grid(shape, dx, dy)
-    h = np.sqrt(x_grid**2 + y_grid**2)
-
-    safe_range = max(float(range_val), 1e-6)
-    safe_sill = max(float(sill), 1e-6)
-    safe_nugget = max(float(nugget), 0.0)
-
-    if model == "Gaussian":
-        covariance = safe_sill * np.exp(-3.0 * (h / safe_range) ** 2)
-    elif model == "Exponential":
-        covariance = safe_sill * np.exp(-3.0 * h / safe_range)
-    else:
-        ratio = h / safe_range
-        covariance = np.where(h <= safe_range, safe_sill * (1.0 - (1.5 * ratio - 0.5 * ratio**3)), 0.0)
-
-    spectrum = np.abs(np.fft.fft2(covariance))
-    white_noise = rng.normal(0.0, 1.0, shape)
-    field_fft = np.fft.fft2(white_noise)
-    spatial_field = np.real(np.fft.ifft2(field_fft * np.sqrt(spectrum)))
-
-    spatial_std = float(np.std(spatial_field))
-    if spatial_std > 0:
-        spatial_field = spatial_field / spatial_std
-
-    if safe_nugget > 0:
-        spatial_field += rng.normal(0.0, np.sqrt(safe_nugget), shape)
-
-    total_std = float(np.std(spatial_field))
-    if total_std > 0:
-        spatial_field = spatial_field / total_std
-
-    return spatial_field.astype(np.float32)
+_initialize_surface_state()
 
 
-@lru_cache(maxsize=6)
-def _normalized_realization_stack(
-    n_maps: int,
-    model: str,
-    range_val: float,
-    sill: float,
-    nugget: float,
-    smooth_sigma: float,
-) -> np.ndarray:
-    logger.info(
-        "Generating normalized realizations | n_maps=%s model=%s range=%.1f sill=%.3f nugget=%.3f smooth=%.2f",
-        n_maps,
-        model,
-        range_val,
-        sill,
-        nugget,
-        smooth_sigma,
-    )
-
-    rng = np.random.default_rng(42)
-    stack = np.empty((n_maps, *base_twt.shape), dtype=np.float32)
-
-    for map_idx in range(n_maps):
-        field = generate_geostatistical_realization(
-            shape=base_twt.shape,
-            dx=100.0,
-            dy=100.0,
-            model=model,
-            range_val=range_val,
-            nugget=nugget,
-            sill=sill,
-            rng=rng,
-        )
-
-        if smooth_sigma > 0:
-            filtered = gaussian_filter(field, sigma=smooth_sigma)
-            filtered_std = float(np.std(filtered))
-            if filtered_std > 0:
-                filtered = filtered / filtered_std
-            field = filtered.astype(np.float32)
-
-        stack[map_idx] = field
-
-    return stack
+def _set_progress(value: int) -> None:
+    try:
+        progress_monte_carlo.value = max(0, min(100, int(value)))
+    except Exception:
+        pass
 
 
-def get_velocity_and_depth_stacks() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    normalized = _normalized_realization_stack(
+def _invalidate_caches() -> None:
+    stack_cache["key"] = None
+    stack_cache["data"] = None
+    trap_cache["key"] = None
+    trap_cache["data"] = None
+
+
+def _stack_key() -> tuple:
+    return (
+        int(surface_state["token"]),
         sld_n_maps.value,
         sld_slope.value,
         round(float(sld_range.value), 3),
         round(float(sld_sill.value), 6),
         round(float(sld_nugget.value), 6),
         round(float(sld_smooth.value), 3),
+        round(float(sld_std_dev.value), 4),
+        bool(chk_torch_accel.value),
     )
 
-    velocity_stack = base_velocity.values[None, :, :] + normalized * sld_std_dev.value
-    velocity_stack = np.maximum(velocity_stack, 1200.0)
 
-    avg_velocity_map = np.mean(velocity_stack, axis=0)
-    final_depth_map = (base_twt.values * avg_velocity_map) / 2000.0
-    depth_stack = (base_twt.values[None, :, :] * velocity_stack) / 2000.0
-
-    return velocity_stack, depth_stack, avg_velocity_map, final_depth_map
-
-
-def get_trap_and_spill(depth_map: np.ndarray, step: float) -> tuple[float, np.ndarray, float]:
-    crest_idx = int(np.argmin(depth_map))
-    crest_y, crest_x = np.unravel_index(crest_idx, depth_map.shape)
-    crest_depth = float(depth_map[crest_y, crest_x])
-
-    current_level = crest_depth + max(step, 0.1)
-    previous_closed_mask = np.zeros_like(depth_map, dtype=bool)
-    spill_depth = crest_depth
-
-    max_depth = float(np.max(depth_map))
-    while current_level <= max_depth:
-        flooded = depth_map <= current_level
-        labeled, _ = label(flooded)
-        crest_label = labeled[crest_y, crest_x]
-
-        if crest_label == 0:
-            break
-
-        crest_polygon = labeled == crest_label
-        touches_edge = (
-            np.any(crest_polygon[0, :])
-            or np.any(crest_polygon[-1, :])
-            or np.any(crest_polygon[:, 0])
-            or np.any(crest_polygon[:, -1])
-        )
-
-        if touches_edge:
-            break
-
-        previous_closed_mask = crest_polygon
-        spill_depth = current_level
-        current_level += max(step, 0.1)
-
-    return float(spill_depth), previous_closed_mask, crest_depth
+def _trap_key(stack_key: tuple) -> tuple:
+    return (
+        stack_key,
+        round(float(sld_c_inc.value), 3),
+        round(float(sld_thick_mean.value), 3),
+        round(float(sld_thick_std.value), 3),
+    )
 
 
-def compute_trap_statistics(
-    depth_stack: np.ndarray,
-    contour_step: float,
-    thickness_mean: float,
-    thickness_std: float,
-) -> dict[str, np.ndarray]:
-    n_maps = depth_stack.shape[0]
-    cell_area = 100.0 * 100.0
+def _apply_surface_generation(_event=None) -> None:
+    mode = sel_surface.value
+    twt_ms, vel = core_build_surfaces(
+        mode,
+        x_values,
+        y_values,
+        major_sigma=sld_elong_major.value,
+        minor_sigma=sld_elong_minor.value,
+        rotation_deg=sld_elong_rotation.value,
+        twt_base_ms=sld_twt_base.value,
+        twt_amp_ms=sld_twt_amp.value,
+        vel_base=sld_vel_base.value,
+        vel_amp=sld_vel_amp.value,
+    )
+    surface_state["mode"] = mode
+    surface_state["token"] = int(surface_state["token"]) + 1
+    surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_values, x_values], dims=["y", "x"], name="TWT")
+    surface_state["velocity"] = xr.DataArray(vel, coords=[y_values, x_values], dims=["y", "x"], name="Velocity")
 
-    rng = np.random.default_rng(42)
+    _invalidate_caches()
+    _set_progress(0)
+    logger.info("Surface regenerated | mode=%s token=%s", mode, surface_state["token"])
 
-    trap_masks = np.zeros_like(depth_stack, dtype=bool)
-    spill_depths = np.zeros(n_maps, dtype=float)
-    crest_depths = np.zeros(n_maps, dtype=float)
-    areas = np.zeros(n_maps, dtype=float)
-    thickness_total = np.zeros(n_maps, dtype=float)
-    grv = np.zeros(n_maps, dtype=float)
 
-    for map_idx in range(n_maps):
-        depth_map = depth_stack[map_idx]
-        spill_depth, trap_mask, crest_depth = get_trap_and_spill(depth_map, contour_step)
+def _on_surface_mode_change(event) -> None:
+    is_elongated = event.new == "Elongated / Ellipsoidal"
+    for widget in [
+        sld_elong_major,
+        sld_elong_minor,
+        sld_elong_rotation,
+        sld_twt_base,
+        sld_twt_amp,
+        sld_vel_base,
+        sld_vel_amp,
+    ]:
+        widget.visible = is_elongated
 
-        spill_depths[map_idx] = spill_depth
-        crest_depths[map_idx] = crest_depth
-        trap_masks[map_idx] = trap_mask
 
-        if not np.any(trap_mask):
-            continue
+def _on_depth_update_click(_event) -> None:
+    _invalidate_caches()
+    _set_progress(0)
 
-        area = float(np.sum(trap_mask) * cell_area)
-        areas[map_idx] = area
-        thickness_total[map_idx] = max(0.0, spill_depth - crest_depth)
 
-        total_volume = float(np.sum((spill_depth - depth_map[trap_mask])) * cell_area)
+def get_velocity_and_depth_stacks() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    key = _stack_key()
+    if stack_cache["key"] == key and stack_cache["data"] is not None:
+        return stack_cache["data"]
 
-        sampled_thickness = max(10.0, float(rng.normal(thickness_mean, thickness_std)))
-        base_depth_map = depth_map + sampled_thickness
-        base_mask = trap_mask & (base_depth_map < spill_depth)
+    _set_progress(1)
+    base_twt_da = surface_state["twt"]
+    base_vel_da = surface_state["velocity"]
 
-        if np.any(base_mask):
-            base_volume = float(np.sum((spill_depth - base_depth_map[base_mask])) * cell_area)
-        else:
-            base_volume = 0.0
+    def _sim_progress(done: int, total: int) -> None:
+        _set_progress(5 + int(65 * done / max(total, 1)))
 
-        grv[map_idx] = max(0.0, total_volume - base_volume)
+    result = core_generate_velocity_depth_stacks(
+        twt_ms=base_twt_da.values,
+        base_velocity=base_vel_da.values,
+        n_maps=sld_n_maps.value,
+        model=sld_slope.value,
+        range_val=float(sld_range.value),
+        sill=float(sld_sill.value),
+        nugget=float(sld_nugget.value),
+        smooth_sigma=float(sld_smooth.value),
+        velocity_std=float(sld_std_dev.value),
+        seed=42,
+        use_torch=bool(chk_torch_accel.value),
+        progress_cb=_sim_progress,
+    )
 
-    return {
-        "trap_masks": trap_masks,
-        "spill_depths": spill_depths,
-        "crest_depths": crest_depths,
-        "areas": areas,
-        "thickness_total": thickness_total,
-        "grv": grv,
-    }
+    stack_cache["key"] = key
+    stack_cache["data"] = result
+    _set_progress(70)
+    return result
+
+
+def get_trap_stats(depth_stack: np.ndarray) -> dict[str, np.ndarray]:
+    stack_key = _stack_key()
+    key = _trap_key(stack_key)
+    if trap_cache["key"] == key and trap_cache["data"] is not None:
+        return trap_cache["data"]
+
+    def _trap_progress(done: int, total: int) -> None:
+        _set_progress(72 + int(28 * done / max(total, 1)))
+
+    trap_data = core_compute_trap_statistics(
+        depth_stack,
+        contour_step=float(sld_c_inc.value),
+        thickness_mean=float(sld_thick_mean.value),
+        thickness_std=float(sld_thick_std.value),
+        progress_cb=_trap_progress,
+    )
+
+    trap_cache["key"] = key
+    trap_cache["data"] = trap_data
+    _set_progress(100)
+    return trap_data
 
 
 def _build_report_payload() -> dict[str, np.ndarray | pd.DataFrame | float]:
     _, depth_stack, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
-    trap_stats = compute_trap_statistics(depth_stack, sld_c_inc.value, sld_thick_mean.value, sld_thick_std.value)
+    trap_stats = get_trap_stats(depth_stack)
 
     arr_thick = np.asarray(trap_stats["thickness_total"])
     arr_area = np.asarray(trap_stats["areas"]) / 1e6
@@ -569,29 +506,36 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     fig.suptitle(report_title, fontsize=15, fontweight="bold")
     gs = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 1.0], height_ratios=[1.0, 1.0], wspace=0.42, hspace=0.3)
 
+    base_twt = surface_state["twt"]
     extent = [base_twt.x.values.min(), base_twt.x.values.max(), base_twt.y.values.min(), base_twt.y.values.max()]
 
     ax_twt = fig.add_subplot(gs[0, 0])
     twt_img = ax_twt.imshow(base_twt.values, origin="lower", extent=extent, cmap=sel_cmap.value, aspect="auto")
     ax_twt.contour(base_twt.x.values, base_twt.y.values, base_twt.values, levels=sld_contours.value, colors="black", alpha=0.35, linewidths=0.7)
-    ax_twt.axhline(y_section_value, color="red", linestyle="--", linewidth=1.4)
+    xs_line, ys_line = core_line_through_center(base_twt.x.values, base_twt.y.values, sld_section_angle.value)
+    ax_twt.plot(xs_line, ys_line, color="red", linestyle="--", linewidth=1.4)
     ax_twt.set_title("Input Deterministic TWT Map (ms)", fontsize=10, fontweight="bold")
     ax_twt.set_xlabel("x")
     ax_twt.set_ylabel("y")
     fig.colorbar(twt_img, ax=ax_twt, fraction=0.046, pad=0.02)
 
     ax_section = fig.add_subplot(gs[0, 1])
-    x_coords = base_twt.x.values
-    section_stack = depth_stack[:, y_section_idx, :]
+    x_coords, final_section, section_stack = core_extract_section_stack(
+        depth_stack,
+        final_depth_map,
+        base_twt.x.values,
+        base_twt.y.values,
+        sld_section_angle.value,
+    )
     for row in section_stack:
         ax_section.plot(x_coords, row, color="red", alpha=0.2, linewidth=0.7)
-    ax_section.plot(x_coords, final_depth_map[y_section_idx, :], color="black", linewidth=2.2, label="Final Depth from Mean AV")
-    deterministic_spill, _, _ = get_trap_and_spill(final_depth_map, sld_c_inc.value)
+    ax_section.plot(x_coords, final_section, color="black", linewidth=2.2, label="Final Depth from Mean AV")
+    deterministic_spill, _, _ = core_get_trap_and_spill(final_depth_map, sld_c_inc.value)
     ax_section.axhline(deterministic_spill, color="blue", linestyle="--", linewidth=1.5, label="Deterministic Spill")
     top_y, bottom_y = sld_y_range.value
     ax_section.set_ylim(bottom_y, top_y)
-    ax_section.set_title(f"Structural Section (y={y_section_value}m)", fontsize=10, fontweight="bold")
-    ax_section.set_xlabel("Distance (m)")
+    ax_section.set_title(f"Structural Section (Perpendicular, Angle={sld_section_angle.value}°)", fontsize=10, fontweight="bold")
+    ax_section.set_xlabel("Section Samples")
     ax_section.set_ylabel("Depth (m)")
     ax_section.yaxis.labelpad = 2
     ax_section.legend(loc="upper right", fontsize=8)
@@ -605,7 +549,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
 
     ax_depth = fig.add_subplot(gs[1, 0])
     depth_img = ax_depth.imshow(final_depth_map, origin="lower", extent=extent, cmap=sel_cmap.value, aspect="auto")
-    ax_depth.axhline(y_section_value, color="red", linestyle="--", linewidth=1.4)
+    ax_depth.plot(xs_line, ys_line, color="red", linestyle="--", linewidth=1.4)
     ax_depth.contour(base_twt.x.values, base_twt.y.values, final_depth_map, levels=[deterministic_spill], colors="red", linestyles="--", linewidths=1.8)
     ax_depth.set_title("Final Depth Map = (TWT ms × AV)/2000", fontsize=10, fontweight="bold")
     ax_depth.set_xlabel("x")
@@ -645,11 +589,12 @@ def _build_pdf_tables_page(report_title: str, payload: dict) -> plt.Figure:
         colLabels=summary_display.columns,
         loc="center",
         cellLoc="center",
+        bbox=[0.0, 0.02, 1.0, 0.86],
     )
     summary_tbl.auto_set_font_size(False)
     summary_tbl.set_fontsize(9)
     summary_tbl.scale(1.0, 1.45)
-    axes[0].set_title("Summary Statistics (P90 / P50 / P10 / Mean)", fontsize=11, fontweight="bold", pad=10)
+    axes[0].set_title("Summary Statistics (P90 / P50 / P10 / Mean)", fontsize=11, fontweight="bold", pad=18)
 
     axes[1].axis("off")
     head_df = realization_display.head(20).copy()
@@ -658,11 +603,12 @@ def _build_pdf_tables_page(report_title: str, payload: dict) -> plt.Figure:
         colLabels=head_df.columns,
         loc="center",
         cellLoc="center",
+        bbox=[0.0, 0.02, 1.0, 0.86],
     )
     detail_tbl.auto_set_font_size(False)
     detail_tbl.set_fontsize(8)
     detail_tbl.scale(1.0, 1.2)
-    axes[1].set_title("Per-Realization Results (first 20 rows)", fontsize=11, fontweight="bold", pad=10)
+    axes[1].set_title("Per-Realization Results (first 20 rows)", fontsize=11, fontweight="bold", pad=18)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
@@ -681,6 +627,8 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
         f"- Number of realizations: {sld_n_maps.value}",
         f"- Velocity Std. Dev. (m/s): {sld_std_dev.value}",
         f"- Smoothing sigma: {sld_smooth.value}",
+        f"- Section/Cut angle (°): {sld_section_angle.value}",
+        f"- Torch acceleration enabled: {chk_torch_accel.value}",
         f"- Contour step (spill search, m): {sld_c_inc.value}",
         "",
         "Variogram",
@@ -711,9 +659,72 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
 # ==============================================================================
 sel_surface = pn.widgets.Select(
     name="Select Surface",
-    options=["Synthetic TWT Input"],
+    options=["Synthetic TWT Input", "Elongated / Ellipsoidal"],
     value="Synthetic TWT Input",
     stylesheets=select_stylesheets,
+)
+sld_elong_major = pn.widgets.FloatSlider(
+    name="Elongated Major Axis Sigma (m)",
+    start=500,
+    end=5000,
+    value=2800,
+    step=100,
+    visible=False,
+    stylesheets=slider_stylesheets,
+)
+sld_elong_minor = pn.widgets.FloatSlider(
+    name="Elongated Minor Axis Sigma (m)",
+    start=300,
+    end=3000,
+    value=1200,
+    step=50,
+    visible=False,
+    stylesheets=slider_stylesheets,
+)
+sld_elong_rotation = pn.widgets.FloatSlider(
+    name="Elongated Azimuth (°)",
+    start=0,
+    end=180,
+    value=25,
+    step=1,
+    visible=False,
+    stylesheets=slider_stylesheets,
+)
+sld_twt_base = pn.widgets.FloatSlider(
+    name="TWT Base (ms)",
+    start=3200,
+    end=5200,
+    value=4000,
+    step=25,
+    visible=False,
+    stylesheets=slider_stylesheets,
+)
+sld_twt_amp = pn.widgets.FloatSlider(
+    name="TWT Closure Amplitude (ms)",
+    start=100,
+    end=1200,
+    value=700,
+    step=10,
+    visible=False,
+    stylesheets=slider_stylesheets,
+)
+sld_vel_base = pn.widgets.FloatSlider(
+    name="Velocity Base (m/s)",
+    start=2200,
+    end=4200,
+    value=3000,
+    step=10,
+    visible=False,
+    stylesheets=slider_stylesheets,
+)
+sld_vel_amp = pn.widgets.FloatSlider(
+    name="Velocity Dome Amplitude (m/s)",
+    start=0,
+    end=500,
+    value=120,
+    step=5,
+    visible=False,
+    stylesheets=slider_stylesheets,
 )
 sld_contours = pn.widgets.IntSlider(
     name="Contours Range Number",
@@ -788,10 +799,26 @@ sld_map_show = pn.widgets.IntSlider(
     value=25,
     stylesheets=slider_stylesheets,
 )
+sld_section_angle = pn.widgets.FloatSlider(
+    name="Section/Cut Angle (°)",
+    start=0,
+    end=360,
+    value=0,
+    step=1,
+    stylesheets=slider_stylesheets,
+)
+chk_torch_accel = pn.widgets.Checkbox(name="Use Torch acceleration (if available)", value=True)
 btn_update_depth_maps = pn.widgets.Button(
     name="Update Velocity & Depth Realizations",
     css_classes=["omv-run-btn"],
     stylesheets=get_neon_button_stylesheets(),
+    sizing_mode="stretch_width",
+)
+progress_monte_carlo = pn.widgets.Progress(
+    name="Monte Carlo Progress",
+    value=0,
+    max=100,
+    bar_color="primary",
     sizing_mode="stretch_width",
 )
 
@@ -892,6 +919,13 @@ btn_update_volumetrics = pn.widgets.Button(
     sizing_mode="stretch_width",
 )
 
+sel_surface.param.watch(_on_surface_mode_change, "value")
+btn_generate_surf.on_click(_apply_surface_generation)
+btn_update_depth_maps.on_click(_on_depth_update_click)
+btn_update_vario.on_click(_on_depth_update_click)
+btn_update_culm.on_click(_on_depth_update_click)
+btn_update_volumetrics.on_click(_on_depth_update_click)
+
 txt_report_header = pn.widgets.TextInput(name="Plot Header", value="Structural Uncertainty Evaluation")
 txt_report_filename = pn.widgets.TextInput(name="File Name", value="structural_uncertainty_report")
 txt_report_location = pn.widgets.TextInput(name="Location", value=str(APP_DIR / "reports"))
@@ -908,65 +942,70 @@ report_status = pn.pane.Markdown("Ready to export report.")
 # ==============================================================================
 #  PLOTTING FUNCTIONS
 # ==============================================================================
-@pn.depends(btn_generate_surf)
+@pn.depends(btn_generate_surf, sld_section_angle)
 def plot_top_left_input_twt_map(*_args):
     logger.info("Rendering input TWT map")
 
-    da = base_twt.copy()
+    da = surface_state["twt"].copy()
     base_plot = da.hvplot.image(
         cmap=sel_cmap.value,
         title="Input Deterministic TWT Map (ms)",
         colorbar=True,
     )
     contours = da.hvplot.contour(levels=sld_contours.value, color="black", alpha=0.5)
-    cross_section = hv.HLine(y_section_value).opts(color="red", line_width=2, line_dash="dashed")
+    xs_line, ys_line = core_line_through_center(da.x.values, da.y.values, sld_section_angle.value)
+    cross_section = hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
     return (base_plot * contours * cross_section).opts(toolbar="above", aspect=None, data_aspect=None)
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario)
+@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, sld_section_angle)
 def plot_top_right_section(*_args):
     logger.info("Rendering structural section with stochastic depth realizations")
 
     _, depth_stack, _, final_depth_map = get_velocity_and_depth_stacks()
-
-    x_coords = base_twt.x.values
-    base_section = final_depth_map[y_section_idx, :]
-    realization_section = depth_stack[:, y_section_idx, :]
+    base_twt = surface_state["twt"]
+    x_coords, final_section, section_stack = core_extract_section_stack(
+        depth_stack,
+        final_depth_map,
+        base_twt.x.values,
+        base_twt.y.values,
+        sld_section_angle.value,
+    )
 
     base_curve = hv.Curve(
-        (x_coords, base_section),
+        (x_coords, final_section),
         kdims=["Distance_x"],
         vdims=["Depth_Z"],
         label="Final Depth from Mean AV",
     ).opts(color="black", line_width=3)
 
-    selected_idx = min(max(sld_map_show.value - 1, 0), realization_section.shape[0] - 1)
+    selected_idx = min(max(sld_map_show.value - 1, 0), section_stack.shape[0] - 1)
     realization_curves = [
-        hv.Curve((x_coords, realization_section[i]), label="Stochastic Depth Realizations").opts(
+        hv.Curve((x_coords, section_stack[i]), label="Stochastic Depth Realizations").opts(
             color="red",
             line_width=0.6,
             alpha=0.25,
         )
-        for i in range(realization_section.shape[0])
+        for i in range(section_stack.shape[0])
         if i != selected_idx
     ]
     selected_curve = hv.Curve(
-        (x_coords, realization_section[selected_idx]),
+        (x_coords, section_stack[selected_idx]),
         kdims=["Distance_x"],
         vdims=["Depth_Z"],
         label=f"Selected Realization #{selected_idx + 1}",
     ).opts(color="red", line_width=2.3, alpha=1.0)
 
-    deterministic_spill, _, _ = get_trap_and_spill(final_depth_map, sld_c_inc.value)
+    deterministic_spill, _, _ = core_get_trap_and_spill(final_depth_map, sld_c_inc.value)
     spill_line = hv.HLine(deterministic_spill, label="Deterministic Spill Point").opts(color="blue", line_dash="dashed", line_width=2)
 
     top_y, bottom_y = sld_y_range.value
 
     return (hv.Overlay(realization_curves + [selected_curve]) * base_curve * spill_line).opts(
         toolbar="above",
-        title=f"Structural Section (y={y_section_value}m)",
+        title=f"Structural Section (Perpendicular, Angle={sld_section_angle.value}°)",
         ylim=(bottom_y, top_y),
-        xlabel="Distance (m)",
+        xlabel="Distance along section (m)",
         ylabel="Depth (m)",
         shared_axes=False,
         show_legend=True,
@@ -974,12 +1013,14 @@ def plot_top_right_section(*_args):
     )
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario)
+@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, sld_section_angle)
 def plot_bottom_left_final_depth_from_av(*_args):
+    global av_depth_tabs
     logger.info("Rendering average AV map and final depth map")
 
     _, _, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
 
+    base_twt = surface_state["twt"]
     av_da = xr.DataArray(avg_velocity_map, coords=base_twt.coords, dims=base_twt.dims, name="AV")
     depth_da = xr.DataArray(final_depth_map, coords=base_twt.coords, dims=base_twt.dims, name="Depth")
 
@@ -993,9 +1034,10 @@ def plot_bottom_left_final_depth_from_av(*_args):
         data_aspect=None,
         toolbar="above",
     )
-    overlay = depth_plot * hv.HLine(y_section_value).opts(color="red", line_width=2, line_dash="dashed")
+    xs_line, ys_line = core_line_through_center(base_twt.x.values, base_twt.y.values, sld_section_angle.value)
+    overlay = depth_plot * hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
 
-    deterministic_spill, deterministic_mask, _ = get_trap_and_spill(final_depth_map, sld_c_inc.value)
+    deterministic_spill, deterministic_mask, _ = core_get_trap_and_spill(final_depth_map, sld_c_inc.value)
 
     if chk_eliminate.value and np.any(deterministic_mask):
         masked_depth = depth_da.where(deterministic_mask)
@@ -1005,13 +1047,23 @@ def plot_bottom_left_final_depth_from_av(*_args):
         red_contour = depth_da.hvplot.contour(levels=[deterministic_spill], cmap=["red"]).opts(line_width=3, line_dash="dashed")
         overlay = overlay * red_contour
 
-    return pn.Tabs(
-        ("Average AV", pn.panel(av_plot, sizing_mode="stretch_both")),
-        ("Final Depth", pn.panel(overlay.opts(aspect=None, data_aspect=None), sizing_mode="stretch_both")),
-        dynamic=False,
-        tabs_location="above",
-        sizing_mode="stretch_both",
-    )
+    average_panel = pn.panel(av_plot, sizing_mode="stretch_both")
+    final_panel = pn.panel(overlay.opts(aspect=None, data_aspect=None), sizing_mode="stretch_both")
+
+    if av_depth_tabs is None:
+        av_depth_tabs = pn.Tabs(
+            ("Average AV", average_panel),
+            ("Final Depth", final_panel),
+            dynamic=False,
+            tabs_location="above",
+            sizing_mode="stretch_both",
+        )
+    else:
+        current_active = av_depth_tabs.active
+        av_depth_tabs[:] = [("Average AV", average_panel), ("Final Depth", final_panel)]
+        av_depth_tabs.active = min(current_active, 1)
+
+    return av_depth_tabs
 
 
 @pn.depends(btn_update_vario)
@@ -1048,7 +1100,7 @@ def plot_bottom_right_isoprobability(*_args):
     _, depth_stack, _, _ = get_velocity_and_depth_stacks()
     n_maps = depth_stack.shape[0]
 
-    trap_stats = compute_trap_statistics(depth_stack, sld_c_inc.value, sld_thick_mean.value, sld_thick_std.value)
+    trap_stats = get_trap_stats(depth_stack)
     count_array = trap_stats["trap_masks"].sum(axis=0).astype(float)
     prob_array = (count_array / n_maps) * 100
 
@@ -1058,7 +1110,7 @@ def plot_bottom_right_isoprobability(*_args):
             "ClosureCount": (["y", "x"], count_array),
             "TotalMaps": (["y", "x"], np.full_like(count_array, n_maps)),
         },
-        coords={"x": base_twt.x.values, "y": base_twt.y.values},
+        coords={"x": surface_state["twt"].x.values, "y": surface_state["twt"].y.values},
     )
 
     custom_hover = HoverTool(
@@ -1097,7 +1149,8 @@ def create_hist_with_stats(data: np.ndarray, name: str, color: str, title: str):
 
     counts, _ = np.histogram(data, bins=20)
     max_y = float(counts.max())
-    x_offset = float((data.max() - data.min()) * 0.02)
+    y_top = max(max_y * 1.18, 1.0)
+    x_text = float(data.min() + (data.max() - data.min()) * 0.03)
 
     hist = pd.DataFrame({name: data}).hvplot.hist(
         name,
@@ -1112,24 +1165,24 @@ def create_hist_with_stats(data: np.ndarray, name: str, color: str, title: str):
     l_p50 = hv.VLine(p50_val, label="P50").opts(color="green", line_dash="dashed", line_width=1.5)
     l_p10 = hv.VLine(p10_val, label="P10").opts(color="blue", line_dash="dashed", line_width=1.5)
 
-    t_mean = hv.Text(mean_val + x_offset, max_y * 0.95, f"Mean: {mean_val:.2f}", halign="left", valign="top").opts(
+    t_mean = hv.Text(x_text, y_top * 0.96, f"Mean: {mean_val:.2f}", halign="left", valign="top").opts(
         color="black",
-        text_font_size="8pt",
+        text_font_size="9pt",
         text_font_style="bold",
     )
-    t_p90 = hv.Text(p90_val + x_offset, max_y * 0.80, f"P90: {p90_val:.2f}", halign="left", valign="top").opts(
+    t_p90 = hv.Text(x_text, y_top * 0.89, f"P90: {p90_val:.2f}", halign="left", valign="top").opts(
         color="red",
-        text_font_size="8pt",
+        text_font_size="9pt",
         text_font_style="bold",
     )
-    t_p50 = hv.Text(p50_val + x_offset, max_y * 0.95, f"P50: {p50_val:.2f}", halign="left", valign="top").opts(
+    t_p50 = hv.Text(x_text, y_top * 0.82, f"P50: {p50_val:.2f}", halign="left", valign="top").opts(
         color="green",
-        text_font_size="8pt",
+        text_font_size="9pt",
         text_font_style="bold",
     )
-    t_p10 = hv.Text(p10_val + x_offset, max_y * 0.80, f"P10: {p10_val:.2f}", halign="left", valign="top").opts(
+    t_p10 = hv.Text(x_text, y_top * 0.75, f"P10: {p10_val:.2f}", halign="left", valign="top").opts(
         color="blue",
-        text_font_size="8pt",
+        text_font_size="9pt",
         text_font_style="bold",
     )
 
@@ -1137,6 +1190,8 @@ def create_hist_with_stats(data: np.ndarray, name: str, color: str, title: str):
         show_legend=True,
         legend_position="top_right",
         shared_axes=False,
+        ylim=(0, y_top),
+        fontsize={"title": 10, "labels": 9, "xticks": 8, "yticks": 8},
     )
 
 
@@ -1186,7 +1241,7 @@ def plot_third_column_volumetrics(*_args):
 
     _, depth_stack, _, _ = get_velocity_and_depth_stacks()
 
-    trap_stats = compute_trap_statistics(depth_stack, sld_c_inc.value, sld_thick_mean.value, sld_thick_std.value)
+    trap_stats = get_trap_stats(depth_stack)
     arr_thick = np.asarray(trap_stats["thickness_total"])
     arr_area = np.asarray(trap_stats["areas"]) / 1e6
     arr_grv = np.asarray(trap_stats["grv"]) / 1e9
@@ -1200,9 +1255,9 @@ def plot_third_column_volumetrics(*_args):
         / 1e6
     )
 
-    p1 = create_hist_with_stats(arr_thick, "Thickness (m)", "#8888ff", "Crest-to-Spill Thick.")
-    p2 = create_hist_with_stats(arr_area, "Area (km²)", "#ff8888", "Closure Area")
-    p3 = create_hist_with_stats(arr_grv, "GRV (km³)", "#88ff88", "GRV Dist.")
+    p1 = create_hist_with_stats(arr_thick, "Thickness (m)", "#8888ff", "Crest-to-Spill Thick.").opts(xlabel="")
+    p2 = create_hist_with_stats(arr_area, "Area (km²)", "#ff8888", "Closure Area").opts(xlabel="")
+    p3 = create_hist_with_stats(arr_grv, "GRV (km³)", "#88ff88", "GRV Dist.").opts(xlabel="")
     p4 = create_hist_with_stats(arr_stoiip, "STOIIP (MMbbls)", "#ffaa00", "STOIIP Dist.")
 
     hist_grid = pn.GridSpec(nrows=4, ncols=1, sizing_mode="stretch_both", margin=0)
@@ -1266,7 +1321,21 @@ def create_sidebar_card(title: str, *widgets, collapsed: bool = True) -> pn.Card
     )
 
 
-card_1 = create_sidebar_card("Input Selection", sel_surface, sld_contours, sel_cmap, btn_generate_surf, collapsed=False)
+card_1 = create_sidebar_card(
+    "Input Selection",
+    sel_surface,
+    sld_elong_major,
+    sld_elong_minor,
+    sld_elong_rotation,
+    sld_twt_base,
+    sld_twt_amp,
+    sld_vel_base,
+    sld_vel_amp,
+    sld_contours,
+    sel_cmap,
+    btn_generate_surf,
+    collapsed=False,
+)
 card_2 = create_sidebar_card("Trap Detection Rules", sld_c_inc, chk_eliminate, chk_close_poly, btn_update_culm)
 card_3 = create_sidebar_card(
     "Velocity Realizations",
@@ -1275,7 +1344,10 @@ card_3 = create_sidebar_card(
     sld_smooth,
     sld_y_range,
     sld_map_show,
+    sld_section_angle,
+    chk_torch_accel,
     btn_update_depth_maps,
+    progress_monte_carlo,
 )
 
 vario_pane = pn.panel(plot_bottom_left_variogram, sizing_mode="stretch_width", min_height=250)

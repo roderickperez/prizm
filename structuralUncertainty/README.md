@@ -11,6 +11,14 @@ This document explains the Structural Uncertainty module end-to-end:
 - launcher/constants integration
 - how to run and troubleshoot
 
+Latest implementation updates in this version:
+
+- compute logic split into reusable core module (`core/engine.py`)
+- optional accelerated realization path (Torch when available)
+- progress bar for realization + trap-statistics Monte Carlo processing
+- new surface mode: `Elongated / Ellipsoidal` with conditional geometry sliders
+- map cut-line angle control (0–360°) with perpendicular structural section extraction
+
 ---
 
 ## 1) Module Purpose
@@ -70,12 +78,15 @@ When `pages/structuralUncertainty.py` is loaded:
 
 ### Step C — Base Surfaces Creation
 
-`create_synthetic_twt_and_velocity()` returns:
+`core/engine.py::build_surfaces()` returns deterministic model inputs:
 
 - deterministic TWT map in milliseconds (ms)
 - deterministic AV map in meters/second (m/s)
 
-These are the deterministic model inputs.
+Supported surface modes:
+
+- `Synthetic TWT Input` (baseline dome)
+- `Elongated / Ellipsoidal` (anisotropic closure with user-controlled major/minor axis and azimuth)
 
 ### Step D — Geostatistical Realizations
 
@@ -90,9 +101,10 @@ The simulation pipeline:
 
 Performance details:
 
-- Realization fields are cached using `lru_cache`.
-- Cached keys include map count and variogram/smoothing parameters.
-- This avoids recomputing unchanged scenarios.
+- stochastic field generation is handled in `core/engine.py`
+- optional Torch FFT path is used when enabled and available
+- app-level stack and trap caches avoid recomputation when parameters are unchanged
+- Monte Carlo progress is exposed in the UI progress bar
 
 ### Step E — Depth Conversion
 
@@ -153,7 +165,10 @@ From mean AV map:
 - Smoothing sigma
 - Section Y-range
 - Realization selector
+- Section/Cut angle (°)
+- optional Torch acceleration toggle
 - Update Velocity & Depth Realizations button
+- Monte Carlo progress bar
 
 ### GRV and STOIIP
 
