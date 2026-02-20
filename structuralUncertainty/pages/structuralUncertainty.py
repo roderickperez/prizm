@@ -1,4 +1,5 @@
 import ctypes
+import json
 import logging
 import os
 import platform
@@ -173,6 +174,25 @@ logger = setup_structural_logger(LOG_DIR)
 av_depth_tabs = None
 
 
+def load_snapshot_payload() -> dict:
+    data_file = os.environ.get("PWR_DATA_FILE")
+    if not data_file or not os.path.exists(data_file):
+        return {}
+    try:
+        with open(data_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+            return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+SNAPSHOT_PAYLOAD = load_snapshot_payload()
+PROJECT_NAME = str(SNAPSHOT_PAYLOAD.get("project", "Unknown"))
+IMPORTED_SURFACE_GUID = SNAPSHOT_PAYLOAD.get("selected_surface_guid")
+IMPORTED_SURFACE_NAME = str(SNAPSHOT_PAYLOAD.get("selected_surface_name", "Imported Surface"))
+IMPORTED_SURFACE_DATA = SNAPSHOT_PAYLOAD.get("imported_surface") if isinstance(SNAPSHOT_PAYLOAD.get("imported_surface"), dict) else None
+
+
 # ==============================================================================
 #  PANEL EXTENSION & CUSTOM CSS
 # ==============================================================================
@@ -265,6 +285,27 @@ slider_stylesheets = get_slider_stylesheets()
 x_values = np.linspace(0, 10000, 100)
 y_values = np.linspace(0, 10000, 100)
 
+
+def _parse_imported_surface() -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    if not IMPORTED_SURFACE_DATA:
+        return None
+    try:
+        x_arr = np.asarray(IMPORTED_SURFACE_DATA.get("x", []), dtype=float)
+        y_arr = np.asarray(IMPORTED_SURFACE_DATA.get("y", []), dtype=float)
+        z_arr = np.asarray(IMPORTED_SURFACE_DATA.get("z", []), dtype=float)
+        if x_arr.ndim != 1 or y_arr.ndim != 1 or z_arr.ndim != 2:
+            return None
+        if z_arr.shape != (len(y_arr), len(x_arr)):
+            return None
+        if len(x_arr) < 2 or len(y_arr) < 2:
+            return None
+        return x_arr, y_arr, z_arr.astype(np.float32)
+    except Exception:
+        return None
+
+
+IMPORTED_SURFACE_PARSED = _parse_imported_surface()
+
 surface_state: dict[str, object] = {
     "mode": "Synthetic TWT Input",
     "token": 0,
@@ -278,6 +319,8 @@ def _initialize_surface_state() -> None:
     twt_ms, vel = core_build_surfaces("Synthetic TWT Input", x_values, y_values)
     surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_values, x_values], dims=["y", "x"], name="TWT")
     surface_state["velocity"] = xr.DataArray(vel, coords=[y_values, x_values], dims=["y", "x"], name="Velocity")
+    surface_state["imported_available"] = IMPORTED_SURFACE_PARSED is not None
+    surface_state["imported_name"] = IMPORTED_SURFACE_NAME
 
 
 _initialize_surface_state()
@@ -322,22 +365,46 @@ def _trap_key(stack_key: tuple) -> tuple:
 
 def _apply_surface_generation(_event=None) -> None:
     mode = sel_surface.value
-    twt_ms, vel = core_build_surfaces(
-        mode,
-        x_values,
-        y_values,
-        major_sigma=sld_elong_major.value,
-        minor_sigma=sld_elong_minor.value,
-        rotation_deg=sld_elong_rotation.value,
-        twt_base_ms=sld_twt_base.value,
-        twt_amp_ms=sld_twt_amp.value,
-        vel_base=sld_vel_base.value,
-        vel_amp=sld_vel_amp.value,
-    )
+    if mode == "Imported Petrel Surface":
+        if IMPORTED_SURFACE_PARSED is None:
+            pn.state.notifications.warning("No imported Petrel surface found in launcher payload; using synthetic surface.", duration=3000)
+            mode = "Synthetic TWT Input"
+            twt_ms, vel = core_build_surfaces(
+                mode,
+                x_values,
+                y_values,
+                major_sigma=sld_elong_major.value,
+                minor_sigma=sld_elong_minor.value,
+                rotation_deg=sld_elong_rotation.value,
+                twt_base_ms=sld_twt_base.value,
+                twt_amp_ms=sld_twt_amp.value,
+                vel_base=sld_vel_base.value,
+                vel_amp=sld_vel_amp.value,
+            )
+            x_coords, y_coords = x_values, y_values
+        else:
+            x_coords, y_coords, imported_z = IMPORTED_SURFACE_PARSED
+            twt_ms = imported_z
+            vel = np.full_like(twt_ms, float(sld_vel_base.value), dtype=np.float32)
+    else:
+        twt_ms, vel = core_build_surfaces(
+            mode,
+            x_values,
+            y_values,
+            major_sigma=sld_elong_major.value,
+            minor_sigma=sld_elong_minor.value,
+            rotation_deg=sld_elong_rotation.value,
+            twt_base_ms=sld_twt_base.value,
+            twt_amp_ms=sld_twt_amp.value,
+            vel_base=sld_vel_base.value,
+            vel_amp=sld_vel_amp.value,
+        )
+        x_coords, y_coords = x_values, y_values
+
     surface_state["mode"] = mode
     surface_state["token"] = int(surface_state["token"]) + 1
-    surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_values, x_values], dims=["y", "x"], name="TWT")
-    surface_state["velocity"] = xr.DataArray(vel, coords=[y_values, x_values], dims=["y", "x"], name="Velocity")
+    surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_coords, x_coords], dims=["y", "x"], name="TWT")
+    surface_state["velocity"] = xr.DataArray(vel, coords=[y_coords, x_coords], dims=["y", "x"], name="Velocity")
 
     _invalidate_caches()
     _set_progress(0)
@@ -659,7 +726,7 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
 # ==============================================================================
 sel_surface = pn.widgets.Select(
     name="Select Surface",
-    options=["Synthetic TWT Input", "Elongated / Ellipsoidal"],
+    options=["Synthetic TWT Input", "Elongated / Ellipsoidal", "Imported Petrel Surface"],
     value="Synthetic TWT Input",
     stylesheets=select_stylesheets,
 )
@@ -937,6 +1004,19 @@ btn_export_report = pn.widgets.Button(
     sizing_mode="stretch_width",
 )
 report_status = pn.pane.Markdown("Ready to export report.")
+
+txt_export_petrel_surface_name = pn.widgets.TextInput(
+    name="Surface Name",
+    value="StructuralUncertainty_FinalDepth",
+    sizing_mode="stretch_width",
+)
+btn_export_petrel_surface = pn.widgets.Button(
+    name="Export Final Depth Surface to Petrel",
+    css_classes=["omv-run-btn"],
+    stylesheets=get_neon_button_stylesheets(),
+    sizing_mode="stretch_width",
+)
+petrel_export_status = pn.pane.Markdown("No Petrel export requested yet.")
 
 
 # ==============================================================================
@@ -1235,6 +1315,60 @@ def _export_report(_event) -> None:
 btn_export_report.on_click(_export_report)
 
 
+def _export_surface_to_petrel(_event) -> None:
+    try:
+        from cegalprizm.pythontool import PetrelConnection
+    except Exception as exc:
+        petrel_export_status.object = f"❌ Export failed: cegalprizm unavailable ({exc})"
+        return
+
+    try:
+        _, _, _, final_depth_map = get_velocity_and_depth_stacks()
+        twt_da = surface_state["twt"]
+        x_coords = np.asarray(twt_da.x.values, dtype=float)
+        y_coords = np.asarray(twt_da.y.values, dtype=float)
+
+        if len(x_coords) < 2 or len(y_coords) < 2:
+            petrel_export_status.object = "❌ Export failed: invalid surface grid axes"
+            return
+
+        surface_array = np.asarray(final_depth_map, dtype=float).T
+        surface_name = txt_export_petrel_surface_name.value.strip() or "StructuralUncertainty_FinalDepth"
+
+        ptp = PetrelConnection(allow_experimental=True)
+        folder = next(iter(ptp.interpretation_folders.values()), None)
+        if folder is None:
+            petrel_export_status.object = "❌ Export failed: no interpretation folder available in Petrel"
+            return
+
+        existing_names = {getattr(s, "petrel_name", "") for s in ptp.surfaces}
+        final_name = surface_name
+        if final_name in existing_names:
+            final_name = f"{surface_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+        p0 = (float(np.min(x_coords)), float(np.min(y_coords)))
+        p1 = (float(np.max(x_coords)), float(np.min(y_coords)))
+        p2 = (float(np.min(x_coords)), float(np.max(y_coords)))
+
+        created = ptp.create_surface(
+            name=final_name,
+            domain="Elevation depth",
+            folder=folder,
+            origin_corner=p0,
+            i_corner=p1,
+            j_corner=p2,
+            array=surface_array,
+        )
+
+        created_name = getattr(created, "petrel_name", final_name)
+        petrel_export_status.object = f"✅ Exported to Petrel surface: {created_name}"
+    except Exception as exc:
+        petrel_export_status.object = f"❌ Export failed: {exc}"
+
+
+btn_export_petrel_surface.on_click(_export_surface_to_petrel)
+
+
 @pn.depends(btn_update_volumetrics, btn_update_depth_maps, btn_update_culm, btn_update_vario)
 def plot_third_column_volumetrics(*_args):
     logger.debug("Computing volumetrics distribution")
@@ -1364,7 +1498,13 @@ card_6 = create_sidebar_card(
     btn_export_report,
     report_status,
 )
-card_7 = create_sidebar_card("Export to Petrel", pn.Spacer(height=10))
+card_7 = create_sidebar_card(
+    "Export to Petrel",
+    pn.pane.Markdown(f"Imported Surface: **{IMPORTED_SURFACE_NAME}**"),
+    txt_export_petrel_surface_name,
+    btn_export_petrel_surface,
+    petrel_export_status,
+)
 
 sidebar_items = [card_1, card_4, card_2, card_3, card_5, card_6, card_7]
 

@@ -2,17 +2,12 @@ import sys
 import os
 import time
 import psutil
-from pathlib import Path
 from datetime import datetime # <--- Added for timestamps
 
 # --- CRITICAL FIX FOR PARALLEL PROCESSING ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 if current_script_dir not in sys.path:
     sys.path.append(current_script_dir)
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 import panel as pn
 import pandas as pd
@@ -22,8 +17,6 @@ import holoviews as hv
 from holoviews import opts, streams
 from scipy.ndimage import generic_filter
 import concurrent.futures 
-
-from shared.ui.omv_theme import DARK_BLUE_OMV_COLOR, MAGENTA_OMV_COLOR, NEON_MAGENTA_OMV_COLOR
 
 # --- IMPORT LOCAL WORKER MODULE ---
 try:
@@ -56,31 +49,6 @@ FAVICON_PATH = r"N:\_USER_GLOBAL\PETREL\Prizm\wf\Vienna\images\OMV_brandLogoPack
 valid_logo = LOGO_PATH if os.path.exists(LOGO_PATH) else None
 valid_favicon = FAVICON_PATH if os.path.exists(FAVICON_PATH) else None
 
-
-def get_radio_group_stylesheets() -> list[str]:
-    return [
-        f"""
-        .bk-btn-group > .bk-btn,
-        .bk-btn-group > button.bk-btn {{
-            background: {NEON_MAGENTA_OMV_COLOR} !important;
-            background-color: {NEON_MAGENTA_OMV_COLOR} !important;
-            color: {DARK_BLUE_OMV_COLOR} !important;
-            border-color: {NEON_MAGENTA_OMV_COLOR} !important;
-            font-weight: 600 !important;
-        }}
-
-        .bk-btn-group > .bk-btn.bk-active,
-        .bk-btn-group > button.bk-btn.bk-active,
-        .bk-btn-group > .bk-btn[aria-pressed="true"],
-        .bk-btn-group > button.bk-btn[aria-pressed="true"] {{
-            background: {MAGENTA_OMV_COLOR} !important;
-            background-color: {MAGENTA_OMV_COLOR} !important;
-            color: white !important;
-            border-color: {MAGENTA_OMV_COLOR} !important;
-        }}
-        """
-    ]
-
 # ==============================================================================
 #  SEISMIC FOOTPRINT APP CLASS
 # ==============================================================================
@@ -93,23 +61,16 @@ class SeismicFootprintApp:
         
         self.dims = (1, 1, 1) 
         self.amp_limit = 1000.0 
-        self.radio_group_stylesheets = get_radio_group_stylesheets()
         
         self.info_card = pn.Card(
             pn.Column(
                 pn.pane.Markdown(f"**Project:** {self.project_name}"),
                 pn.pane.Markdown(f"**Selected Volume:** {self.cube_name}"),
             ),
-            title="Session Info", collapsed=True, styles={'background': 'white'}
+            title="Session Info", collapsed=False, styles={'background': 'white'}
         )
 
-        self.radio_group = pn.widgets.RadioButtonGroup(
-            name='Slice Type',
-            options=['Timeslice'],
-            button_type='success',
-            value='Timeslice',
-            stylesheets=self.radio_group_stylesheets,
-        )
+        self.radio_group = pn.widgets.RadioButtonGroup(name='Slice Type', options=['Timeslice'], button_type='success', value='Timeslice')
         self.slice_slider = pn.widgets.IntSlider(name='Time Slice Selection', start=0, end=1, value=0, disabled=True)
         self.seismic_cmap = pn.widgets.Select(name='Seismic Colormap', options=['RdBu', 'gray', 'bwr', 'PuOr', 'viridis'], value='RdBu')
 
@@ -118,7 +79,7 @@ class SeismicFootprintApp:
                 pn.pane.Markdown("**Orientation:**"), self.radio_group, self.slice_slider,
                 pn.pane.Markdown("**Visualization:**"), self.seismic_cmap,
             ),
-            title="Slice Controls", collapsed=True, styles={'background': 'white'}
+            title="Slice Controls", collapsed=False, styles={'background': 'white'}
         )
 
         self.direction_selector = pn.widgets.Select(name='Filter Direction', options=['Horizontal (Trace-wise)', 'Vertical (Column-wise)'], value='Horizontal (Trace-wise)')
@@ -136,7 +97,7 @@ class SeismicFootprintApp:
                 pn.layout.Divider(), pn.pane.Markdown("**Visuals:**"), self.noise_amp_scale,
                 pn.layout.Divider(), self.update_btn, self.progress_bar, self.progress_text
             ),
-            title="Footprint Suppression (EMD)", collapsed=True, styles={'background': 'white'}
+            title="Footprint Suppression (EMD)", collapsed=False, styles={'background': 'white'}
         )
 
         self.export_name_input = pn.widgets.TextInput(name='Output Name', value=f"{self.cube_name}_EMD_Filtered")
@@ -146,7 +107,7 @@ class SeismicFootprintApp:
 
         self.export_card = pn.Card(
             pn.Column(self.export_name_input, self.export_btn, pn.Row(self.export_spinner, self.export_status)),
-            title="Export", collapsed=True, styles={'background': 'white'}
+            title="Export", collapsed=False, styles={'background': 'white'}
         )
 
         self.plot_orig_pane = pn.pane.HoloViews(sizing_mode='stretch_both')

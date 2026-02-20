@@ -1,0 +1,33 @@
+import numpy as np
+
+# Try importing EMD, handle failure gracefully for the worker
+try:
+    from PyEMD import EEMD
+    HAS_EMD = True
+except ImportError:
+    HAS_EMD = False
+
+def emd_worker(signal, imfs_to_remove):
+    """
+    Independent worker function for parallel processing.
+    Must be in a separate file to work on Windows.
+    """
+    if not HAS_EMD:
+        return signal, np.zeros_like(signal)
+        
+    if np.all(np.isnan(signal)):
+        return signal, signal # Return original if NaN
+    
+    try:
+        # Re-instantiate EEMD inside worker to avoid shared state issues
+        eemd = EEMD(trials=5)
+        imfs = eemd.eemd(signal)
+        
+        if imfs is not None and imfs.shape[0] > imfs_to_remove:
+            keep_signal = np.sum(imfs[imfs_to_remove:], axis=0)
+            noise_signal = signal - keep_signal
+            return keep_signal, noise_signal
+        else:
+            return signal, np.zeros_like(signal)
+    except:
+        return signal, np.zeros_like(signal)
