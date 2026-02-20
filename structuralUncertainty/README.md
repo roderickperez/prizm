@@ -338,27 +338,39 @@ Keep these invariants unchanged unless requirements change:
 
 ---
 
-## 12) Workflow Diagram (Mermaid)
+## 12) Current Functionalities Summary
 
-```mermaid
-flowchart TD
-  A[Deterministic TWT Map\nInput Surface] --> B[Variogram Parameters\nModel, Range, Sill, Nugget]
-  B --> C[Geostatistical Simulation\nGenerate N normalized fields]
-  C --> D[Velocity Realizations\nAV_i = AV_det + sigma * field_i]
-  D --> E[Depth Realizations\nDepth_i = TWT * AV_i / 2000]
+The current module provides the following operational capabilities:
 
-  D --> F[Average Velocity Map\nAV_mean = mean(AV_i)]
-  F --> G[Final Depth Map\nDepth_final = TWT * AV_mean / 2000]
-
-  E --> H[Structural Section\nAll realizations + selected map]
-  E --> I[Isoprobability Map\nP(Depth <= C)]
-  E --> J[Volumetrics per realization\nArea, Thickness, GRV, STOIIP]
-
-  J --> K[Monte Carlo Distributions\nP10 / P50 / P90 / Mean]
-
-  L[Update Variogram Button] --> C
-  M[Update Velocity & Depth Button] --> D
-  N[Update Closure/Culmination Button] --> H
-  N --> I
-  N --> J
-```
+- Input modes:
+  - Synthetic baseline TWT
+  - Elongated/ellipsoidal synthetic TWT
+  - Imported Petrel surface (including `--test` file mode)
+- Full uncertainty workflow:
+  - Variogram-driven velocity realizations
+  - Mean AV map and final depth map
+  - Structural section extraction along configurable cut angle
+  - Isoprobability map for isolated closure occurrence
+  - Monte Carlo distributions for thickness, area, GRV, and STOOIP
+- Trap and closure handling:
+  - Domain-aware culmination/spill detection (positive and negative depth domains)
+  - Closure masking and deterministic spill contour overlays
+  - Final depth contour controls (toggle + contour interval)
+- Unit-system controls (General Setting):
+  - Velocity: ft/s or m/s
+  - X/Y: meters or feet
+  - Time maps: milliseconds or seconds
+  - Depth maps: feet or meters
+  - Area: m2 or ft2
+  - Volume: m3 or ft3
+  - Unit changes propagate to calculations, map labels, section labels, and reporting
+- Performance and reliability:
+  - Optional Torch acceleration path
+  - Stack/trap caching for repeated parameter states
+  - Progress bar updates for Monte Carlo processing
+  - Test-mode diagnostics and logging for finite/range checks
+- Reporting and export:
+  - PNG/JPEG dashboard export
+  - Multi-page PDF export with summary + full per-realization tables
+  - Styled PDF tables with OMV branding
+  - Petrel surface export for final depth map

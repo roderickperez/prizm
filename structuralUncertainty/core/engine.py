@@ -32,8 +32,8 @@ def build_surfaces(
     major_sigma: float = 2600.0,
     minor_sigma: float = 1200.0,
     rotation_deg: float = 30.0,
-    twt_base_ms: float = 4000.0,
-    twt_amp_ms: float = 700.0,
+    twt_base_ms: float = -1850.0,
+    twt_amp_ms: float = 260.0,
     vel_base: float = 3000.0,
     vel_amp: float = 120.0,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -46,12 +46,12 @@ def build_surfaces(
         xr = (x_grid - x0) * np.cos(theta) + (y_grid - y0) * np.sin(theta)
         yr = -(x_grid - x0) * np.sin(theta) + (y_grid - y0) * np.cos(theta)
 
-        twt_ms = twt_base_ms - twt_amp_ms * np.exp(-((xr**2) / (2 * max(major_sigma, 1.0) ** 2) + (yr**2) / (2 * max(minor_sigma, 1.0) ** 2)))
+        twt_ms = twt_base_ms + twt_amp_ms * np.exp(-((xr**2) / (2 * max(major_sigma, 1.0) ** 2) + (yr**2) / (2 * max(minor_sigma, 1.0) ** 2)))
 
         vel = vel_base + vel_amp * np.exp(-(((x_grid - x0) ** 2) / (2 * (major_sigma * 1.2) ** 2) + ((y_grid - y0) ** 2) / (2 * (minor_sigma * 1.2) ** 2)))
         return twt_ms.astype(np.float32), vel.astype(np.float32)
 
-    twt_ms = twt_base_ms - twt_amp_ms * np.exp(-(((x_grid - x0) ** 2 + (y_grid - y0) ** 2) / (2 * 2000.0**2)))
+    twt_ms = twt_base_ms + twt_amp_ms * np.exp(-(((x_grid - x0) ** 2 + (y_grid - y0) ** 2) / (2 * 2000.0**2)))
     vel = vel_base + vel_amp * np.exp(-(((x_grid - (x0 + 1500)) ** 2 + (y_grid - (y0 - 800)) ** 2) / (2 * 3500.0**2)))
     return twt_ms.astype(np.float32), vel.astype(np.float32)
 
@@ -185,6 +185,8 @@ def generate_velocity_depth_stacks(
     nugget: float,
     smooth_sigma: float,
     velocity_std: float,
+    dx: float = 100.0,
+    dy: float = 100.0,
     seed: int = 42,
     use_torch: bool = False,
     progress_cb: ProgressCb = None,
@@ -194,9 +196,9 @@ def generate_velocity_depth_stacks(
 
     for idx in range(n_maps):
         if use_torch and torch is not None:
-            field = _generate_field_torch(twt_ms.shape, 100.0, 100.0, model, range_val, nugget, sill)
+            field = _generate_field_torch(twt_ms.shape, dx, dy, model, range_val, nugget, sill)
         else:
-            field = _generate_field_numpy(twt_ms.shape, 100.0, 100.0, model, range_val, nugget, sill, rng)
+            field = _generate_field_numpy(twt_ms.shape, dx, dy, model, range_val, nugget, sill, rng)
 
         if smooth_sigma > 0:
             filtered = gaussian_filter(field, sigma=smooth_sigma)
@@ -220,17 +222,35 @@ def generate_velocity_depth_stacks(
 
 
 def get_trap_and_spill(depth_map: np.ndarray, step: float) -> tuple[float, np.ndarray, float]:
-    crest_idx = int(np.argmin(depth_map))
+    step_val = max(float(step), 0.1)
+    is_negative_domain = bool(np.nanmax(depth_map) <= 0.0)
+
+    if is_negative_domain:
+        crest_idx = int(np.nanargmax(depth_map))
+    else:
+        crest_idx = int(np.nanargmin(depth_map))
+
     crest_y, crest_x = np.unravel_index(crest_idx, depth_map.shape)
     crest_depth = float(depth_map[crest_y, crest_x])
 
-    current_level = crest_depth + max(step, 0.1)
     previous_closed_mask = np.zeros_like(depth_map, dtype=bool)
     spill_depth = crest_depth
 
-    max_depth = float(np.max(depth_map))
-    while current_level <= max_depth:
-        flooded = depth_map <= current_level
+    if is_negative_domain:
+        current_level = crest_depth - step_val
+        min_depth = float(np.nanmin(depth_map))
+        cond = lambda level: level >= min_depth
+        flood_fn = lambda arr, level: arr >= level
+        update_fn = lambda level: level - step_val
+    else:
+        current_level = crest_depth + step_val
+        max_depth = float(np.nanmax(depth_map))
+        cond = lambda level: level <= max_depth
+        flood_fn = lambda arr, level: arr <= level
+        update_fn = lambda level: level + step_val
+
+    while cond(current_level):
+        flooded = flood_fn(depth_map, current_level)
         labeled, _ = label(flooded)
         crest_label = labeled[crest_y, crest_x]
 
@@ -250,7 +270,7 @@ def get_trap_and_spill(depth_map: np.ndarray, step: float) -> tuple[float, np.nd
 
         previous_closed_mask = crest_polygon
         spill_depth = current_level
-        current_level += max(step, 0.1)
+        current_level = update_fn(current_level)
 
     return float(spill_depth), previous_closed_mask, crest_depth
 
@@ -260,10 +280,10 @@ def compute_trap_statistics(
     contour_step: float,
     thickness_mean: float,
     thickness_std: float,
+    cell_area: float = 10000.0,
     progress_cb: ProgressCb = None,
 ) -> dict[str, np.ndarray]:
     n_maps = depth_stack.shape[0]
-    cell_area = 100.0 * 100.0
 
     rng = np.random.default_rng(42)
 
@@ -277,6 +297,7 @@ def compute_trap_statistics(
     for map_idx in range(n_maps):
         depth_map = depth_stack[map_idx]
         spill_depth, trap_mask, crest_depth = get_trap_and_spill(depth_map, contour_step)
+        is_negative_domain = bool(np.nanmax(depth_map) <= 0.0)
 
         spill_depths[map_idx] = spill_depth
         crest_depths[map_idx] = crest_depth
@@ -289,12 +310,18 @@ def compute_trap_statistics(
 
         area = float(np.sum(trap_mask) * cell_area)
         areas[map_idx] = area
-        thickness_total[map_idx] = max(0.0, spill_depth - crest_depth)
+        thickness_total[map_idx] = max(0.0, (crest_depth - spill_depth) if is_negative_domain else (spill_depth - crest_depth))
 
-        total_volume = float(np.sum((spill_depth - depth_map[trap_mask])) * cell_area)
+        if is_negative_domain:
+            height_to_spill = depth_map[trap_mask] - spill_depth
+        else:
+            height_to_spill = spill_depth - depth_map[trap_mask]
+
+        height_to_spill = np.clip(height_to_spill, a_min=0.0, a_max=None)
+        total_volume = float(np.sum(height_to_spill) * cell_area)
 
         sampled_thickness = max(10.0, float(rng.normal(thickness_mean, thickness_std)))
-        relative_depth = spill_depth - depth_map[trap_mask] - sampled_thickness
+        relative_depth = height_to_spill - sampled_thickness
         base_volume = float(np.sum(np.clip(relative_depth, a_min=0.0, a_max=None)) * cell_area)
 
         grv[map_idx] = max(0.0, total_volume - base_volume)

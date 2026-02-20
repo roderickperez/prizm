@@ -115,6 +115,36 @@ def get_neon_button_stylesheets() -> list[str]:
     ]
 
 
+def get_radio_button_stylesheets() -> list[str]:
+    return [
+        f"""
+        .bk-btn-group .bk-btn,
+        .bk-btn-group button.bk-btn,
+        .bk-btn-group .bk-btn:not(.bk-active),
+        .bk-btn-group button.bk-btn:not(.bk-active),
+        .bk-btn-group .bk-btn[aria-pressed='false'],
+        .bk-btn-group button.bk-btn[aria-pressed='false'] {{
+            background: {NEON_MAGENTA_OMV_COLOR} !important;
+            background-color: {NEON_MAGENTA_OMV_COLOR} !important;
+            border-color: {MAGENTA_OMV_COLOR} !important;
+            color: {DARK_BLUE_OMV_COLOR} !important;
+            font-weight: 400 !important;
+        }}
+
+        .bk-btn-group .bk-btn.bk-active,
+        .bk-btn-group button.bk-btn.bk-active,
+        .bk-btn-group .bk-btn[aria-pressed='true'],
+        .bk-btn-group button.bk-btn[aria-pressed='true'] {{
+            background: {MAGENTA_OMV_COLOR} !important;
+            background-color: {MAGENTA_OMV_COLOR} !important;
+            border-color: {MAGENTA_OMV_COLOR} !important;
+            color: white !important;
+            font-weight: 400 !important;
+        }}
+        """
+    ]
+
+
 def get_plot_surface_background(is_dark_mode: bool) -> str:
     return DARK_MODE_PLOT_BACKGROUND if is_dark_mode else "white"
 
