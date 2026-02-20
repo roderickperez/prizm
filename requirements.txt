@@ -16,6 +16,7 @@ hvplot
 xarray
 duckdb
 reportlab
+openpyxl
 
 # Domain-specific signal processing
 bruges

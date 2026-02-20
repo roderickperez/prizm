@@ -54,6 +54,83 @@ section_header_background = NEON_OMV_COLOR
 section_body_background = DARK_BLUE_OMV_COLOR if is_dark_mode else "white"
 section_text_color = get_content_text_color(is_dark_mode)
 
+TEST_MODE = ("--test" in sys.argv) or (os.environ.get("PRIZM_CHECKSHOT_TEST_MODE", "0") in {"1", "true", "True"})
+TEST_WELLS_DIR = ROOT_DIR / "referenceDocumentation" / "checkShotQC" / "wells"
+
+
+def _safe_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _load_test_mode_data(wells_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    headers_rows: list[dict] = []
+    checkshot_frames: list[pd.DataFrame] = []
+
+    if not wells_dir.exists():
+        return (
+            pd.DataFrame(columns=['WellName', 'UWI', 'GUID', 'X', 'Y', 'Lat', 'Long', 'KB', 'GL', 'SRD', 'DF', 'SE', 'SO', 'Vc']),
+            pd.DataFrame(columns=['WellName', 'MD', 'TWT', 'TVD']),
+            "TestMode",
+        )
+
+    for file_path in sorted(wells_dir.glob("*.csv")):
+        try:
+            df = pd.read_csv(file_path)
+        except Exception:
+            continue
+
+        required = ["Well Name", "Measured Depth from KB (ft)", "Raw pick time (ms)"]
+        if not all(col in df.columns for col in required):
+            continue
+
+        df = df[required].copy()
+        df = df.dropna(subset=required)
+        if df.empty:
+            continue
+
+        well_name = str(df.iloc[0]["Well Name"]).strip()
+        if not well_name:
+            continue
+
+        df["Measured Depth from KB (ft)"] = _safe_numeric(df["Measured Depth from KB (ft)"])
+        df["Raw pick time (ms)"] = _safe_numeric(df["Raw pick time (ms)"])
+        df = df.dropna(subset=["Measured Depth from KB (ft)", "Raw pick time (ms)"])
+        if df.empty:
+            continue
+
+        check_df = pd.DataFrame(
+            {
+                "WellName": well_name,
+                "MD": df["Measured Depth from KB (ft)"].astype(float),
+                "TWT": df["Raw pick time (ms)"].astype(float),
+                "TVD": df["Measured Depth from KB (ft)"].astype(float),
+            }
+        )
+        checkshot_frames.append(check_df)
+
+        headers_rows.append(
+            {
+                "WellName": well_name,
+                "UWI": "",
+                "GUID": f"TEST::{well_name}",
+                "X": 0.0,
+                "Y": 0.0,
+                "Lat": 0.0,
+                "Long": 0.0,
+                "KB": 0.0,
+                "GL": 0.0,
+                "SRD": 0.0,
+                "DF": 0.0,
+                "SE": 0.0,
+                "SO": 0.0,
+                "Vc": 5000.0,
+            }
+        )
+
+    headers_df = pd.DataFrame(headers_rows).drop_duplicates(subset=["WellName"]).reset_index(drop=True)
+    checkshots_df = pd.concat(checkshot_frames, ignore_index=True) if checkshot_frames else pd.DataFrame(columns=['WellName', 'MD', 'TWT', 'TVD'])
+    return headers_df, checkshots_df, "CheckShot Test Mode"
+
 # --- CSS Styling ---
 css = f"""
 .tabulator-header, .tabulator-header-contents, .tabulator-col, .tabulator-col-content {{
@@ -362,6 +439,21 @@ class CheckShotApp:
             self.update_inputs_from_selection(None)
 
     def load_data(self):
+        if TEST_MODE:
+            headers, checkshots, proj = _load_test_mode_data(TEST_WELLS_DIR)
+            surveys = pd.DataFrame(columns=['WellName', 'MD', 'Inclination', 'Azimuth', 'TVD', 'X', 'Y', 'Z'])
+            logs = pd.DataFrame(columns=['WellName', 'MD', 'DT'])
+            tops = pd.DataFrame(columns=['WellName', 'Surface', 'MD', 'TVD'])
+
+            required_params = ['KB', 'GL', 'SRD', 'DF', 'SE', 'SO', 'Vc']
+            for col in required_params:
+                if col not in headers.columns:
+                    headers[col] = 0.0
+            if 'Vc' in headers.columns:
+                headers['Vc'] = headers['Vc'].fillna(5000.0)
+
+            return headers, checkshots, surveys, logs, tops, proj
+
         data_file = os.environ.get("PWR_DATA_FILE")
         headers = pd.DataFrame(columns=['WellName', 'UWI', 'GUID', 'X', 'Y', 'Lat', 'Long', 'KB', 'GL', 'SRD', 'DF', 'SE', 'SO', 'Vc'])
         checkshots = pd.DataFrame(columns=['WellName', 'MD', 'TWT', 'TVD'])
@@ -474,7 +566,6 @@ class CheckShotApp:
         kb = params.get('kb', 0)
         gl = params.get('gl', 0)
         srd = params.get('srd', 0)
-        se = params.get('se', 0)
         so = params.get('so', 0)
         vc = params.get('vc', 1800)
         df_val = params.get('df', 0)
@@ -498,17 +589,19 @@ class CheckShotApp:
         
         if 'Z' not in dff.columns: dff['Z'] = dff['MD']
 
-        dz = dff['MD'] - (kb - se)
+        # Template-aligned geometry:
+        # Theta = atan(offset / depth_to_GL)
+        # Vertical OWT to GL = Raw_pick_time * cos(theta)
+        dz = depth_gl
         hypot = np.sqrt(dz**2 + so**2)
         
         with np.errstate(divide='ignore', invalid='ignore'):
             cos_theta = np.where(hypot == 0, 1, dz / hypot)
             theta_rad = np.arccos(np.clip(cos_theta, -1, 1))
 
-        t_vert_source = dff['TWT'] * cos_theta
-        static_source_gl = ((gl - se) / vc) * 1000.0 if vc != 0 else 0
-        t_vert_gl = t_vert_source + static_source_gl
+        t_vert_gl = dff['TWT'] * cos_theta
 
+        # Template static correction (one-way): (SRD - GL) / Vc * 1000
         datum_static = ((srd - gl) / vc) * 1000.0 if vc != 0 else 0
         t_vert_srd = t_vert_gl + datum_static
 
@@ -1314,5 +1407,8 @@ END HEADER
 app = CheckShotApp()
 template = app.get_template()
 template.servable()
+
+if TEST_MODE:
+    pn.state.notifications.info(f"Test mode enabled: loaded wells from {TEST_WELLS_DIR}", duration=6000)
 
 # Working code Feb, 12th, 2026 | 17:10
