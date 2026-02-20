@@ -1,0 +1,18 @@
+Petrel Surface Parsed
+file: /home/roderickperez/DataScienceProjects/Prizm_OMV/referenceDocumentation/structuralUncertaintyEvaluation/testData/surfaceTest
+grid(header): (489, 1036)
+grid(detected): (46, 41)
+X: min=488598.969, max=490598.969
+Y: min=3195848.250, max=3198098.250
+Z (imported surface): min=-1694.234, max=-1673.717
+
+Synthetic Option 1 (Negative TWT)
+TWT: min=-1654.126, max=-1590.020
+Velocity: min=3117.103, max=3149.802
+
+Synthetic Option 2 (Negative TWT Elongated)
+TWT: min=-1770.422, max=-1580.065
+Velocity: min=3186.516, max=3219.983
+
+Imported Option 3 (Petrel Test Surface)
+TWT/Depth: min=-1694.234, max=-1673.717

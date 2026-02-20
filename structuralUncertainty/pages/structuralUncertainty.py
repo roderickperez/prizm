@@ -325,9 +325,12 @@ surface_state: dict[str, object] = {
     "token": 0,
     "section_angle_applied": 0.0,
 }
+refresh_token = pn.widgets.IntInput(name="_refresh_token", value=0, visible=False)
 
 stack_cache: dict[str, object] = {"key": None, "data": None}
 trap_cache: dict[str, object] = {"key": None, "data": None}
+hist_panel_cache: dict[str, object] = {"key": None, "panel": None}
+MAX_VELOCITY_STD_FPS = 50.0
 
 
 def _initialize_surface_state() -> None:
@@ -369,6 +372,8 @@ def _invalidate_caches() -> None:
     stack_cache["data"] = None
     trap_cache["key"] = None
     trap_cache["data"] = None
+    hist_panel_cache["key"] = None
+    hist_panel_cache["panel"] = None
 
 
 def _sync_section_y_range() -> None:
@@ -394,10 +399,7 @@ def _refresh_unit_labels() -> None:
 
 
 def _trigger_refresh() -> None:
-    btn_update_depth_maps.clicks = btn_update_depth_maps.clicks + 1
-    btn_update_culm.clicks = btn_update_culm.clicks + 1
-    btn_update_vario.clicks = btn_update_vario.clicks + 1
-    btn_update_volumetrics.clicks = btn_update_volumetrics.clicks + 1
+    refresh_token.value = int(refresh_token.value) + 1
 
 
 def _on_velocity_units_change(event) -> None:
@@ -532,7 +534,7 @@ def _recommend_velocity_std_from_surface() -> dict[str, float]:
 
     target_depth_std = float(np.clip(0.20 * depth_relief, 0.25, 1.0))
     suggested_vel_std = float(np.clip(target_depth_std * 2000.0 / abs_twt_median, 0.3, 1.2))
-    upper_reasonable_vel_std = 1.8
+    upper_reasonable_vel_std = MAX_VELOCITY_STD_FPS * 0.3048
 
     return {
         "x_span": x_span,
@@ -549,7 +551,7 @@ def _recommend_velocity_std_from_surface() -> dict[str, float]:
 
 def _apply_velocity_std_recommendation() -> None:
     rec = _recommend_velocity_std_from_surface()
-    std_max_display = 1.8 / _velocity_unit_to_mps()
+    std_max_display = (MAX_VELOCITY_STD_FPS * 0.3048) / _velocity_unit_to_mps()
     sld_std_dev.end = round(std_max_display, 3)
     sld_std_dev.name = f"Velocity Std. Dev. ({rg_velocity_units.value})"
 
@@ -559,11 +561,10 @@ def _apply_velocity_std_recommendation() -> None:
 
     if sld_std_dev.value > sld_std_dev.end:
         sld_std_dev.value = sld_std_dev.end
-    if current_std_mps > upper_reasonable:
-        sld_std_dev.value = round(suggested / _velocity_unit_to_mps(), 3)
+    current_std_mps = float(sld_std_dev.value) * _velocity_unit_to_mps()
 
     logger.info(
-        "Velocity std analysis | map_span=(%.1f x %.1f)m diag=%.1fm twt=[%.2f, %.2f] range=%.2fms depth_relief=%.2fm suggested_std=%.2f(m/s) max_reasonable=1.80(m/s)",
+        "Velocity std analysis | map_span=(%.1f x %.1f)m diag=%.1fm twt=[%.2f, %.2f] range=%.2fms depth_relief=%.2fm suggested_std=%.2f(m/s) max_reasonable=%.2f(m/s) current_std=%.2f(m/s)",
         rec["x_span"],
         rec["y_span"],
         rec["map_diag"],
@@ -573,6 +574,7 @@ def _apply_velocity_std_recommendation() -> None:
         rec["depth_relief"],
         suggested,
         upper_reasonable,
+        current_std_mps,
     )
 
 
@@ -699,10 +701,7 @@ def _apply_surface_generation(_event=None) -> None:
     _invalidate_caches()
     _sync_section_y_range()
     _set_progress(0)
-    btn_update_depth_maps.clicks = btn_update_depth_maps.clicks + 1
-    btn_update_culm.clicks = btn_update_culm.clicks + 1
-    btn_update_vario.clicks = btn_update_vario.clicks + 1
-    btn_update_volumetrics.clicks = btn_update_volumetrics.clicks + 1
+    _trigger_refresh()
     x_min, x_max, y_min, y_max, _, _ = _surface_xy_bounds()
     logger.info(
         "Surface regenerated | mode=%s token=%s cell_area=%.2f x=[%.3f, %.3f] y=[%.3f, %.3f]",
@@ -730,12 +729,14 @@ def _on_surface_mode_change(event) -> None:
         sld_vel_amp,
     ]:
         widget.visible = is_elongated
+    _apply_surface_generation()
 
 
 def _on_depth_update_click(_event) -> None:
     surface_state["section_angle_applied"] = float(sld_section_angle.value)
     _invalidate_caches()
     _set_progress(0)
+    _trigger_refresh()
     _run_test_mode_diagnostics("depth_update")
 
 
@@ -1011,10 +1012,6 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
         f"- Porosity: {sld_poro.value}",
         f"- Water saturation (Sw): {sld_sw.value}",
         f"- FVF: {sld_fvf.value}",
-        "",
-        "Equations",
-        "- Depth = TWT × AV / 2000 (with current unit selections)",
-        "- STOOIP = (GRV × N/G × Φ × (1 - Sw)) / FVF",
     ]
     ax.text(0.02, 0.98, "\n".join(lines), va="top", ha="left", fontsize=11)
 
@@ -1025,6 +1022,10 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
 #  UI WIDGETS
 # ==============================================================================
 _default_surface_mode = "Imported Petrel Surface" if ("--test" in sys.argv and IMPORTED_SURFACE_PARSED is not None) else "Synthetic TWT Input"
+_surface_mode_hint = pn.pane.Markdown(
+    "",
+    visible=False,
+)
 
 sel_surface = pn.widgets.Select(
     name="Select Surface",
@@ -1150,7 +1151,7 @@ sld_n_maps = pn.widgets.IntSlider(
 sld_std_dev = pn.widgets.FloatSlider(
     name="Velocity Std. Dev. (ft/s)",
     start=0.0,
-    end=5.906,
+    end=50.0,
     value=3.937,
     stylesheets=slider_stylesheets,
 )
@@ -1383,26 +1384,42 @@ btn_export_report = pn.widgets.Button(
     stylesheets=get_neon_button_stylesheets(),
     sizing_mode="stretch_width",
 )
-report_status = pn.pane.Markdown("Ready to export report.")
+report_status = pn.pane.Markdown("", visible=False)
+report_export_progress = pn.widgets.Progress(
+    name="Export Progress",
+    value=0,
+    max=100,
+    sizing_mode="stretch_width",
+    visible=False,
+)
 
 txt_export_petrel_surface_name = pn.widgets.TextInput(
-    name="Surface Name",
-    value="StructuralUncertainty_FinalDepth",
+    name="Export Name Prefix",
+    value="StructuralUncertainty",
     sizing_mode="stretch_width",
 )
+chk_export_average_mean = pn.widgets.Checkbox(name="Average Mean", value=True)
+chk_export_final_depth = pn.widgets.Checkbox(name="Final Depth", value=True)
+chk_export_isoprobability = pn.widgets.Checkbox(name="Isoprobability", value=True)
+chk_export_all_realizations = pn.widgets.Checkbox(name="All realization maps (N)", value=False)
 btn_export_petrel_surface = pn.widgets.Button(
-    name="Export Final Depth Surface to Petrel",
+    name="Export Selected Surfaces to Petrel",
     css_classes=["omv-run-btn"],
     stylesheets=get_neon_button_stylesheets(),
     sizing_mode="stretch_width",
 )
-petrel_export_status = pn.pane.Markdown("No Petrel export requested yet.")
+petrel_export_status = pn.pane.Markdown("", visible=False)
+
+
+def _set_petrel_export_status(message: str) -> None:
+    petrel_export_status.object = message
+    petrel_export_status.visible = True
 
 
 # ==============================================================================
 #  PLOTTING FUNCTIONS
 # ==============================================================================
-@pn.depends(btn_generate_surf, btn_update_depth_maps, rg_xy_units, rg_time_units)
+@pn.depends(btn_generate_surf, btn_update_depth_maps, refresh_token, rg_xy_units, rg_time_units)
 def plot_top_left_input_twt_map(*_args):
     logger.debug("Rendering input TWT map")
 
@@ -1436,7 +1453,7 @@ def plot_top_left_input_twt_map(*_args):
     )
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, rg_depth_units, rg_xy_units)
+@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, refresh_token, rg_depth_units, rg_xy_units)
 def plot_top_right_section(*_args):
     logger.debug("Rendering structural section with stochastic depth realizations")
 
@@ -1523,7 +1540,7 @@ def plot_top_right_section(*_args):
     )
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, rg_velocity_units, rg_depth_units, rg_xy_units)
+@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, refresh_token, rg_velocity_units, rg_depth_units, rg_xy_units)
 def plot_bottom_left_final_depth_from_av(*_args):
     global av_depth_tabs
     logger.debug("Rendering average AV map and final depth map")
@@ -1688,7 +1705,7 @@ def plot_bottom_left_variogram(*_args):
     )
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, btn_update_volumetrics, rg_xy_units)
+@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, btn_update_volumetrics, refresh_token, rg_xy_units)
 def plot_bottom_right_isoprobability(*_args):
     logger.debug("Rendering isoprobability map")
 
@@ -1756,20 +1773,21 @@ def create_hist_with_stats(data: np.ndarray, name: str, color: str, title: str):
     if len(data) == 0 or np.all(data == 0):
         return hv.Curve([]).opts(title=title)
 
-    mean_val = float(np.mean(data))
-    p90_val = float(np.percentile(data, 10))
-    p50_val = float(np.percentile(data, 50))
-    p10_val = float(np.percentile(data, 90))
+    arr = np.asarray(data, dtype=float)
+    mean_val = float(np.mean(arr))
+    p90_val = float(np.percentile(arr, 10))
+    p50_val = float(np.percentile(arr, 50))
+    p10_val = float(np.percentile(arr, 90))
 
-    counts, _ = np.histogram(data, bins=20)
+    counts, edges = np.histogram(arr, bins=20)
     max_y = float(counts.max())
-    y_top = max(max_y * 1.18, 1.0)
-    x_text = float(data.min() + (data.max() - data.min()) * 0.03)
+    y_top = max(max_y * 1.22, 1.0)
+    x_text = float(arr.min() + (arr.max() - arr.min()) * 0.03)
 
-    hist = pd.DataFrame({name: data}).hvplot.hist(
-        name,
-        bins=20,
+    hist = hv.Histogram((edges, counts), kdims=[name], vdims=["Freq"]).opts(
         color=color,
+        alpha=0.72,
+        line_color="white",
         title=title,
         ylabel="Freq",
     )
@@ -1779,24 +1797,24 @@ def create_hist_with_stats(data: np.ndarray, name: str, color: str, title: str):
     l_p50 = hv.VLine(p50_val, label="P50").opts(color="green", line_dash="dashed", line_width=1.5)
     l_p10 = hv.VLine(p10_val, label="P10").opts(color="blue", line_dash="dashed", line_width=1.5)
 
-    t_mean = hv.Text(x_text, y_top * 0.96, f"Mean: {mean_val:.2f}", halign="left", valign="top").opts(
+    t_mean = hv.Text(x_text, y_top * 0.965, f"Mean: {mean_val:.2f}", halign="left", valign="top").opts(
         color="black",
-        text_font_size="9pt",
+        text_font_size="8pt",
         text_font_style="bold",
     )
-    t_p90 = hv.Text(x_text, y_top * 0.89, f"P90: {p90_val:.2f}", halign="left", valign="top").opts(
+    t_p90 = hv.Text(x_text, y_top * 0.865, f"P90: {p90_val:.2f}", halign="left", valign="top").opts(
         color="red",
-        text_font_size="9pt",
+        text_font_size="8pt",
         text_font_style="bold",
     )
-    t_p50 = hv.Text(x_text, y_top * 0.82, f"P50: {p50_val:.2f}", halign="left", valign="top").opts(
+    t_p50 = hv.Text(x_text, y_top * 0.765, f"P50: {p50_val:.2f}", halign="left", valign="top").opts(
         color="green",
-        text_font_size="9pt",
+        text_font_size="8pt",
         text_font_style="bold",
     )
-    t_p10 = hv.Text(x_text, y_top * 0.75, f"P10: {p10_val:.2f}", halign="left", valign="top").opts(
+    t_p10 = hv.Text(x_text, y_top * 0.665, f"P10: {p10_val:.2f}", halign="left", valign="top").opts(
         color="blue",
-        text_font_size="9pt",
+        text_font_size="8pt",
         text_font_style="bold",
     )
 
@@ -1816,20 +1834,26 @@ def _export_report(_event) -> None:
     out_dir = Path(txt_report_location.value.strip() or str(APP_DIR / "reports"))
 
     try:
+        report_export_progress.visible = True
+        report_export_progress.value = 5
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / f"{base_name}{extension}"
 
+        report_export_progress.value = 20
         payload = _build_report_payload()
+        report_export_progress.value = 40
 
         if extension in {".png", ".jpeg"}:
             fig = _build_dashboard_figure(header, payload)
             fig.savefig(output_path, dpi=300, bbox_inches="tight")
             plt.close(fig)
+            report_export_progress.value = 100
         else:
             with PdfPages(output_path) as pdf:
                 fig_dashboard = _build_dashboard_figure(header, payload)
                 pdf.savefig(fig_dashboard, bbox_inches="tight")
                 plt.close(fig_dashboard)
+                report_export_progress.value = 60
 
                 for fig_tables in core_build_pdf_tables_pages(
                     report_title=header,
@@ -1841,82 +1865,356 @@ def _export_report(_event) -> None:
                 ):
                     pdf.savefig(fig_tables, bbox_inches="tight")
                     plt.close(fig_tables)
+                report_export_progress.value = 85
 
                 fig_params = _build_pdf_parameters_page(header)
                 pdf.savefig(fig_params, bbox_inches="tight")
                 plt.close(fig_params)
+                report_export_progress.value = 100
 
-        report_status.object = f"✅ Report exported: {output_path}"
+            pn.state.notifications.success(f"✅ Report exported: {output_path}", duration=3500)
         logger.info("Report exported: %s", output_path)
     except Exception as exc:
-        report_status.object = f"❌ Export failed: {exc}"
+        pn.state.notifications.error(f"❌ Export failed: {exc}", duration=6000)
         logger.exception("Report export failed")
+    finally:
+        time.sleep(0.2)
+        report_export_progress.visible = False
+        report_export_progress.value = 0
 
 
 btn_export_report.on_click(_export_report)
+
+
+def _export_qc_excel_workbook(output_path: Path, payload: dict[str, np.ndarray | pd.DataFrame | float]) -> None:
+    velocity_stack, depth_stack, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
+    trap_stats = get_trap_stats(depth_stack)
+
+    twt_da = surface_state["twt"]
+    vel_da = surface_state["velocity"]
+    x_coords = np.asarray(twt_da.x.values, dtype=float)
+    y_coords = np.asarray(twt_da.y.values, dtype=float)
+    xv, yv = np.meshgrid(x_coords, y_coords)
+
+    twt_flat = np.asarray(twt_da.values, dtype=float).ravel()
+    base_vel_flat = np.asarray(vel_da.values, dtype=float).ravel()
+    x_flat = xv.ravel()
+    y_flat = yv.ravel()
+
+    n_maps = int(depth_stack.shape[0])
+    n_cells = int(twt_flat.size)
+
+    probability = np.asarray(payload["probability"], dtype=float).ravel()
+    trap_count = trap_stats["trap_masks"].sum(axis=0).astype(int).ravel()
+    av_flat = np.asarray(avg_velocity_map, dtype=float).ravel()
+    final_depth_flat = np.asarray(final_depth_map, dtype=float).ravel()
+    depth_from_av_flat = (twt_flat * av_flat) / 2000.0
+
+    arr_thick, arr_area, arr_grv, arr_stooip = _volumetric_series(trap_stats)
+
+    readme_df = pd.DataFrame(
+        {
+            "Section": [
+                "Inputs",
+                "Formulas",
+                "Formulas",
+                "Formulas",
+                "Units",
+                "QC guidance",
+            ],
+            "Description": [
+                "Surface and realization values exported for audit/QC.",
+                "Depth per cell = TWT_ms × Velocity_mps / 2000.",
+                "IsoProbability_% = (TrapCount / N_Realizations) × 100.",
+                "STOOIP_MMbbls = GRV_m3 × N/G × Phi × (1-Sw) / FVF × 6.2898 / 1e6.",
+                "Internal calculations are exported in base units (m, m/s, ms, m2, m3).",
+                "Use Formula columns to compare Excel recalculation vs exported value.",
+            ],
+        }
+    )
+
+    params_df = pd.DataFrame(
+        {
+            "Parameter": [
+                "Surface mode",
+                "N realizations",
+                "Variogram model",
+                "Range",
+                "Sill",
+                "Nugget",
+                "Velocity std dev",
+                "Smoothing sigma",
+                "Contour increment",
+                "Thickness mean",
+                "Thickness std dev",
+                "N/G",
+                "Porosity",
+                "Water saturation",
+                "FVF",
+                "Section angle",
+            ],
+            "Value": [
+                sel_surface.value,
+                int(sld_n_maps.value),
+                sld_slope.value,
+                float(sld_range.value),
+                float(sld_sill.value),
+                float(sld_nugget.value),
+                float(sld_std_dev.value),
+                float(sld_smooth.value),
+                float(sld_c_inc.value),
+                float(sld_thick_mean.value),
+                float(sld_thick_std.value),
+                float(sld_ntg.value),
+                float(sld_poro.value),
+                float(sld_sw.value),
+                float(sld_fvf.value),
+                float(sld_section_angle.value),
+            ],
+            "Unit/Notes": [
+                "UI selection",
+                "count",
+                "Gaussian / Exponential / Spherical",
+                "m",
+                "-",
+                "-",
+                rg_velocity_units.value,
+                "-",
+                rg_depth_units.value,
+                rg_depth_units.value,
+                rg_depth_units.value,
+                "fraction",
+                "fraction",
+                "fraction",
+                "-",
+                "degrees",
+            ],
+        }
+    )
+
+    input_surface_df = pd.DataFrame(
+        {
+            "X_m": x_flat,
+            "Y_m": y_flat,
+            "TWT_ms": twt_flat,
+            "BaseVelocity_mps": base_vel_flat,
+        }
+    )
+
+    map_qc_df = pd.DataFrame(
+        {
+            "X_m": x_flat,
+            "Y_m": y_flat,
+            "TWT_ms": twt_flat,
+            "AV_Mean_mps": av_flat,
+            "DepthFromAV_m": depth_from_av_flat,
+            "FinalDepth_m": final_depth_flat,
+            "DepthDelta_m": final_depth_flat - depth_from_av_flat,
+            "TrapCount": trap_count,
+            "N_Realizations": np.full_like(trap_count, n_maps),
+            "IsoProbability_pct": probability,
+        }
+    )
+
+    realization_summary_df = pd.DataFrame(payload["realization_df"]).copy()
+    volumetrics_qc_df = pd.DataFrame(
+        {
+            "Realization": np.arange(1, n_maps + 1),
+            "GRV_m3": np.asarray(trap_stats["grv"], dtype=float),
+            "N_G": np.full(n_maps, float(sld_ntg.value)),
+            "Phi": np.full(n_maps, float(sld_poro.value)),
+            "OneMinusSw": np.full(n_maps, 1.0 - float(sld_sw.value)),
+            "FVF": np.full(n_maps, float(sld_fvf.value)),
+            "STOOIP_MMbbls_Exported": arr_stooip,
+            "ThicknessTotal_Exported": arr_thick,
+            "Area_Exported": arr_area,
+            "GRV_Exported": arr_grv,
+        }
+    )
+
+    max_excel_rows = 1_048_000
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        readme_df.to_excel(writer, sheet_name="QC_Readme", index=False)
+        params_df.to_excel(writer, sheet_name="Parameters", index=False)
+        input_surface_df.to_excel(writer, sheet_name="Input_Surface", index=False)
+        map_qc_df.to_excel(writer, sheet_name="Map_QC", index=False)
+        realization_summary_df.to_excel(writer, sheet_name="Realization_Summary", index=False)
+        volumetrics_qc_df.to_excel(writer, sheet_name="Volumetrics_QC", index=False)
+
+        ws_map = writer.sheets["Map_QC"]
+        ws_map["K1"] = "DepthFromAV_ExcelFormula"
+        ws_map["L1"] = "DepthDelta_ExcelFormula"
+        ws_map["M1"] = "IsoProbability_ExcelFormula"
+        for row_idx in range(2, len(map_qc_df) + 2):
+            ws_map[f"K{row_idx}"] = f"=C{row_idx}*D{row_idx}/2000"
+            ws_map[f"L{row_idx}"] = f"=F{row_idx}-K{row_idx}"
+            ws_map[f"M{row_idx}"] = f"=IF(I{row_idx}=0,0,H{row_idx}/I{row_idx}*100)"
+
+        ws_vol = writer.sheets["Volumetrics_QC"]
+        ws_vol["K1"] = "STOOIP_MMbbls_ExcelFormula"
+        ws_vol["L1"] = "STOOIP_Delta"
+        for row_idx in range(2, len(volumetrics_qc_df) + 2):
+            ws_vol[f"K{row_idx}"] = f"=B{row_idx}*C{row_idx}*D{row_idx}*E{row_idx}/F{row_idx}*6.2898/1000000"
+            ws_vol[f"L{row_idx}"] = f"=G{row_idx}-K{row_idx}"
+
+        realization_ids = np.repeat(np.arange(1, n_maps + 1), n_cells)
+        x_rep = np.tile(x_flat, n_maps)
+        y_rep = np.tile(y_flat, n_maps)
+        twt_rep = np.tile(twt_flat, n_maps)
+        vel_rep = np.asarray(velocity_stack, dtype=float).reshape(n_maps, -1).ravel()
+        depth_rep = np.asarray(depth_stack, dtype=float).reshape(n_maps, -1).ravel()
+        trap_mask_rep = np.asarray(trap_stats["trap_masks"], dtype=bool).reshape(n_maps, -1).astype(int).ravel()
+
+        realization_cells_df = pd.DataFrame(
+            {
+                "Realization": realization_ids,
+                "X_m": x_rep,
+                "Y_m": y_rep,
+                "TWT_ms": twt_rep,
+                "Velocity_mps": vel_rep,
+                "Depth_m": depth_rep,
+                "TrapMask": trap_mask_rep,
+            }
+        )
+
+        if len(realization_cells_df) == 0:
+            realization_cells_df.to_excel(writer, sheet_name="Realization_Cells_1", index=False)
+        else:
+            n_chunks = int(np.ceil(len(realization_cells_df) / max_excel_rows))
+            for chunk_idx in range(n_chunks):
+                start = chunk_idx * max_excel_rows
+                end = min((chunk_idx + 1) * max_excel_rows, len(realization_cells_df))
+                chunk_df = realization_cells_df.iloc[start:end].copy()
+                sheet_name = f"Realization_Cells_{chunk_idx + 1}"
+                chunk_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                ws_cells = writer.sheets[sheet_name]
+                ws_cells["H1"] = "Depth_ExcelFormula"
+                ws_cells["I1"] = "Depth_Delta"
+                for row_idx in range(2, len(chunk_df) + 2):
+                    ws_cells[f"H{row_idx}"] = f"=D{row_idx}*E{row_idx}/2000"
+                    ws_cells[f"I{row_idx}"] = f"=F{row_idx}-H{row_idx}"
 
 
 def _export_surface_to_petrel(_event) -> None:
     try:
         from cegalprizm.pythontool import PetrelConnection
     except Exception as exc:
-        petrel_export_status.object = f"❌ Export failed: cegalprizm unavailable ({exc})"
+        _set_petrel_export_status(f"❌ Export failed: cegalprizm unavailable ({exc})")
         return
 
     try:
-        _, _, _, final_depth_map = get_velocity_and_depth_stacks()
+        _, depth_stack, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
         twt_da = surface_state["twt"]
         x_coords = np.asarray(twt_da.x.values, dtype=float)
         y_coords = np.asarray(twt_da.y.values, dtype=float)
 
         if len(x_coords) < 2 or len(y_coords) < 2:
-            petrel_export_status.object = "❌ Export failed: invalid surface grid axes"
+            _set_petrel_export_status("❌ Export failed: invalid surface grid axes")
             return
 
-        surface_array = np.asarray(final_depth_map, dtype=float).T
-        surface_name = txt_export_petrel_surface_name.value.strip() or "StructuralUncertainty_FinalDepth"
+        n_maps = int(depth_stack.shape[0])
+        trap_stats = get_trap_stats(depth_stack)
+        count_array = trap_stats["trap_masks"].sum(axis=0).astype(float)
+        prob_array = (count_array / n_maps) * 100.0 if n_maps > 0 else np.zeros_like(count_array)
+
+        prefix = txt_export_petrel_surface_name.value.strip() or "StructuralUncertainty"
+        selected_surfaces: list[tuple[str, np.ndarray]] = []
+
+        if chk_export_average_mean.value:
+            selected_surfaces.append((f"{prefix}_AverageMean", np.asarray(avg_velocity_map, dtype=float).T))
+        if chk_export_final_depth.value:
+            selected_surfaces.append((f"{prefix}_FinalDepth", np.asarray(final_depth_map, dtype=float).T))
+        if chk_export_isoprobability.value:
+            selected_surfaces.append((f"{prefix}_Isoprobability", np.asarray(prob_array, dtype=float).T))
+        if chk_export_all_realizations.value:
+            for idx in range(n_maps):
+                selected_surfaces.append((f"{prefix}_Realization_{idx + 1:03d}", np.asarray(depth_stack[idx], dtype=float).T))
+
+        if not selected_surfaces:
+            _set_petrel_export_status("⚠️ Select at least one export map.")
+            return
 
         ptp = PetrelConnection(allow_experimental=True)
         folder = next(iter(ptp.interpretation_folders.values()), None)
         if folder is None:
-            petrel_export_status.object = "❌ Export failed: no interpretation folder available in Petrel"
+            _set_petrel_export_status("❌ Export failed: no interpretation folder available in Petrel")
             return
 
         existing_names = {getattr(s, "petrel_name", "") for s in ptp.surfaces}
-        final_name = surface_name
-        if final_name in existing_names:
-            final_name = f"{surface_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+        def _unique_name(base_name: str) -> str:
+            if base_name not in existing_names:
+                existing_names.add(base_name)
+                return base_name
+            suffix = 1
+            candidate = f"{base_name}_{suffix:03d}"
+            while candidate in existing_names:
+                suffix += 1
+                candidate = f"{base_name}_{suffix:03d}"
+            existing_names.add(candidate)
+            return candidate
 
         p0 = (float(np.min(x_coords)), float(np.min(y_coords)))
         p1 = (float(np.max(x_coords)), float(np.min(y_coords)))
         p2 = (float(np.min(x_coords)), float(np.max(y_coords)))
 
-        created = ptp.create_surface(
-            name=final_name,
-            domain="Elevation depth",
-            folder=folder,
-            origin_corner=p0,
-            i_corner=p1,
-            j_corner=p2,
-            array=surface_array,
-        )
+        created_names: list[str] = []
+        failed_names: list[str] = []
+        for base_name, surface_array in selected_surfaces:
+            final_name = _unique_name(base_name)
+            try:
+                created = ptp.create_surface(
+                    name=final_name,
+                    domain="Elevation depth",
+                    folder=folder,
+                    origin_corner=p0,
+                    i_corner=p1,
+                    j_corner=p2,
+                    array=surface_array,
+                )
+                created_names.append(getattr(created, "petrel_name", final_name))
+            except Exception:
+                failed_names.append(final_name)
 
-        created_name = getattr(created, "petrel_name", final_name)
-        petrel_export_status.object = f"✅ Exported to Petrel surface: {created_name}"
+        if failed_names and created_names:
+            _set_petrel_export_status(
+                f"⚠️ Partial export: {len(created_names)} created, {len(failed_names)} failed. "
+                f"Created: {', '.join(created_names[:5])}{' ...' if len(created_names) > 5 else ''}"
+            )
+            return
+        if failed_names and not created_names:
+            _set_petrel_export_status(
+                f"❌ Export failed for all selected surfaces ({len(failed_names)} attempted)."
+            )
+            return
+
+        _set_petrel_export_status(
+            f"✅ Exported {len(created_names)} surface(s): "
+            f"{', '.join(created_names[:5])}{' ...' if len(created_names) > 5 else ''}"
+        )
     except Exception as exc:
-        petrel_export_status.object = f"❌ Export failed: {exc}"
+        _set_petrel_export_status(f"❌ Export failed: {exc}")
 
 
 btn_export_petrel_surface.on_click(_export_surface_to_petrel)
 
 
-@pn.depends(btn_update_volumetrics, btn_update_depth_maps, btn_update_culm, btn_update_vario)
+@pn.depends(btn_update_volumetrics, btn_update_depth_maps, btn_update_culm, btn_update_vario, refresh_token)
 def plot_third_column_volumetrics(*_args):
     logger.debug("Computing volumetrics distribution")
 
     _, depth_stack, _, _ = get_velocity_and_depth_stacks()
 
     trap_stats = get_trap_stats(depth_stack)
+    hist_key = (
+        trap_cache.get("key"),
+        _depth_unit_label(),
+        rg_area_units.value,
+        rg_volume_units.value,
+    )
+    if hist_panel_cache["key"] == hist_key and hist_panel_cache["panel"] is not None:
+        return hist_panel_cache["panel"]
+
     arr_thick, arr_area, arr_grv, arr_stooip = _volumetric_series(trap_stats)
 
     p1 = create_hist_with_stats(arr_thick, f"Thickness ({_depth_unit_label()})", "#8888ff", "Crest-to-Spill Thick.").opts(xlabel="")
@@ -1929,7 +2227,10 @@ def plot_third_column_volumetrics(*_args):
     hist_grid[1, 0] = pn.panel(p2, sizing_mode="stretch_both")
     hist_grid[2, 0] = pn.panel(p3, sizing_mode="stretch_both")
     hist_grid[3, 0] = pn.panel(p4, sizing_mode="stretch_both")
-    return pn.Column(hist_grid, css_classes=["hist-container"], sizing_mode="stretch_both", margin=0)
+    hist_panel = pn.Column(hist_grid, css_classes=["hist-container"], sizing_mode="stretch_both", margin=0)
+    hist_panel_cache["key"] = hist_key
+    hist_panel_cache["panel"] = hist_panel
+    return hist_panel
 
 
 # ==============================================================================
@@ -1988,6 +2289,7 @@ def create_sidebar_card(title: str, *widgets, collapsed: bool = True) -> pn.Card
 card_1 = create_sidebar_card(
     "Input Selection",
     sel_surface,
+    _surface_mode_hint,
     sld_elong_major,
     sld_elong_minor,
     sld_elong_rotation,
@@ -2017,21 +2319,23 @@ card_3 = create_sidebar_card(
 vario_pane = pn.panel(plot_bottom_left_variogram, sizing_mode="stretch_width", min_height=250)
 card_4 = create_sidebar_card("Variogram Parameters", sld_slope, sld_range, sld_sill, sld_nugget, btn_update_vario, vario_pane)
 
-formula_text = pn.pane.Markdown("*Formula: Depth(m) = TWT(ms) × AV(m/s) / 2000; STOOIP = (GRV × N/G × Φ × (1 - Sw)) / FVF*")
-card_5 = create_sidebar_card("GRV and STOOIP", formula_text, sld_thick_mean, sld_thick_std, sld_ntg, sld_poro, sld_sw, sld_fvf, btn_update_volumetrics)
+card_5 = create_sidebar_card("GRV and STOOIP", sld_thick_mean, sld_thick_std, sld_ntg, sld_poro, sld_sw, sld_fvf, btn_update_volumetrics)
 card_6 = create_sidebar_card(
     "Report",
     txt_report_header,
     txt_report_filename,
     txt_report_location,
     sel_report_type,
+    report_export_progress,
     btn_export_report,
-    report_status,
 )
 card_7 = create_sidebar_card(
     "Export to Petrel",
-    pn.pane.Markdown(f"Imported Surface: **{IMPORTED_SURFACE_NAME}**"),
     txt_export_petrel_surface_name,
+    chk_export_average_mean,
+    chk_export_final_depth,
+    chk_export_isoprobability,
+    chk_export_all_realizations,
     btn_export_petrel_surface,
     petrel_export_status,
 )
