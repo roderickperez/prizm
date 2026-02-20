@@ -45,15 +45,20 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 #  HELPER: KILL OLD SERVER
 # ==============================================================================
 def kill_process_on_port(port):
-	for proc in psutil.process_iter(["pid", "name"]):
-		try:
-			for con in proc.connections(kind="inet"):
-				if con.laddr.port == port:
-					print(f"--- Killing old process on port {port} (PID: {proc.pid}) ---")
-					proc.terminate()
-					return
-		except Exception:
-			continue
+	try:
+		for con in psutil.net_connections(kind="inet"):
+			if not con.laddr or con.laddr.port != port or con.pid is None:
+				continue
+			proc = psutil.Process(con.pid)
+			print(f"--- Killing old process on port {port} (PID: {proc.pid}) ---")
+			proc.terminate()
+			try:
+				proc.wait(timeout=3)
+			except psutil.TimeoutExpired:
+				proc.kill()
+			return
+	except Exception:
+		pass
 
 
 try:
@@ -104,7 +109,6 @@ process = subprocess.Popen(
 		"panel",
 		"serve",
 		panel_script,
-		"--dev",
 		"--allow-websocket-origin=*",
 		"--port",
 		"5006",

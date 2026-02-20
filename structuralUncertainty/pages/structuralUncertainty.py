@@ -944,7 +944,7 @@ report_status = pn.pane.Markdown("Ready to export report.")
 # ==============================================================================
 @pn.depends(btn_generate_surf, sld_section_angle)
 def plot_top_left_input_twt_map(*_args):
-    logger.info("Rendering input TWT map")
+    logger.debug("Rendering input TWT map")
 
     da = surface_state["twt"].copy()
     base_plot = da.hvplot.image(
@@ -960,7 +960,7 @@ def plot_top_left_input_twt_map(*_args):
 
 @pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, sld_section_angle)
 def plot_top_right_section(*_args):
-    logger.info("Rendering structural section with stochastic depth realizations")
+    logger.debug("Rendering structural section with stochastic depth realizations")
 
     _, depth_stack, _, final_depth_map = get_velocity_and_depth_stacks()
     base_twt = surface_state["twt"]
@@ -1016,7 +1016,7 @@ def plot_top_right_section(*_args):
 @pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, sld_section_angle)
 def plot_bottom_left_final_depth_from_av(*_args):
     global av_depth_tabs
-    logger.info("Rendering average AV map and final depth map")
+    logger.debug("Rendering average AV map and final depth map")
 
     _, _, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
 
@@ -1095,7 +1095,7 @@ def plot_bottom_left_variogram(*_args):
 
 @pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, btn_update_volumetrics)
 def plot_bottom_right_isoprobability(*_args):
-    logger.info("Rendering isoprobability map")
+    logger.debug("Rendering isoprobability map")
 
     _, depth_stack, _, _ = get_velocity_and_depth_stacks()
     n_maps = depth_stack.shape[0]
@@ -1237,7 +1237,7 @@ btn_export_report.on_click(_export_report)
 
 @pn.depends(btn_update_volumetrics, btn_update_depth_maps, btn_update_culm, btn_update_vario)
 def plot_third_column_volumetrics(*_args):
-    logger.info("Computing volumetrics distribution")
+    logger.debug("Computing volumetrics distribution")
 
     _, depth_stack, _, _ = get_velocity_and_depth_stacks()
 

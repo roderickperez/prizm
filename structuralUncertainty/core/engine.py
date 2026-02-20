@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import Callable
 
 import numpy as np
+from scipy import fft as sp_fft
 from scipy.ndimage import gaussian_filter, label, map_coordinates
 
 try:
@@ -12,6 +13,16 @@ except Exception:
     torch = None
 
 ProgressCb = Callable[[int, int], None] | None
+
+
+def _safe_workers() -> int:
+    try:
+        import os
+
+        raw = os.getenv("STRUCTURAL_FFT_WORKERS", "1")
+        return max(1, int(raw))
+    except Exception:
+        return 1
 
 
 def build_surfaces(
@@ -53,6 +64,34 @@ def _covariance_grid(shape: tuple[int, int], dx: float, dy: float) -> tuple[np.n
     return np.meshgrid(x, y)
 
 
+@lru_cache(maxsize=64)
+def _sqrt_spectrum_numpy(
+    shape: tuple[int, int],
+    dx: float,
+    dy: float,
+    model: str,
+    range_val: float,
+    nugget: float,
+    sill: float,
+) -> np.ndarray:
+    x_grid, y_grid = _covariance_grid(shape, dx, dy)
+    h = np.sqrt(x_grid**2 + y_grid**2)
+
+    safe_range = max(float(range_val), 1e-6)
+    safe_sill = max(float(sill), 1e-6)
+
+    if model == "Gaussian":
+        covariance = safe_sill * np.exp(-3.0 * (h / safe_range) ** 2)
+    elif model == "Exponential":
+        covariance = safe_sill * np.exp(-3.0 * h / safe_range)
+    else:
+        ratio = h / safe_range
+        covariance = np.where(h <= safe_range, safe_sill * (1.0 - (1.5 * ratio - 0.5 * ratio**3)), 0.0)
+
+    spectrum = np.abs(sp_fft.fft2(covariance, workers=_safe_workers()))
+    return np.sqrt(spectrum).astype(np.float32, copy=False)
+
+
 def _generate_field_numpy(
     shape: tuple[int, int],
     dx: float,
@@ -63,25 +102,20 @@ def _generate_field_numpy(
     sill: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    x_grid, y_grid = _covariance_grid(shape, dx, dy)
-    h = np.sqrt(x_grid**2 + y_grid**2)
-
-    safe_range = max(float(range_val), 1e-6)
-    safe_sill = max(float(sill), 1e-6)
     safe_nugget = max(float(nugget), 0.0)
 
-    if model == "Gaussian":
-        covariance = safe_sill * np.exp(-3.0 * (h / safe_range) ** 2)
-    elif model == "Exponential":
-        covariance = safe_sill * np.exp(-3.0 * h / safe_range)
-    else:
-        ratio = h / safe_range
-        covariance = np.where(h <= safe_range, safe_sill * (1.0 - (1.5 * ratio - 0.5 * ratio**3)), 0.0)
-
-    spectrum = np.abs(np.fft.fft2(covariance))
+    sqrt_spectrum = _sqrt_spectrum_numpy(
+        shape=shape,
+        dx=dx,
+        dy=dy,
+        model=model,
+        range_val=float(range_val),
+        nugget=float(nugget),
+        sill=float(sill),
+    )
     white_noise = rng.normal(0.0, 1.0, shape)
-    field_fft = np.fft.fft2(white_noise)
-    spatial_field = np.real(np.fft.ifft2(field_fft * np.sqrt(spectrum)))
+    field_fft = sp_fft.fft2(white_noise, workers=_safe_workers())
+    spatial_field = np.real(sp_fft.ifft2(field_fft * sqrt_spectrum, workers=_safe_workers()))
 
     spatial_std = float(np.std(spatial_field))
     if spatial_std > 0:
@@ -110,25 +144,22 @@ def _generate_field_torch(
         raise RuntimeError("torch unavailable")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_grid, y_grid = _covariance_grid(shape, dx, dy)
-
-    h = torch.sqrt(torch.tensor(x_grid, device=device, dtype=torch.float32) ** 2 + torch.tensor(y_grid, device=device, dtype=torch.float32) ** 2)
-
     safe_range = max(float(range_val), 1e-6)
     safe_sill = max(float(sill), 1e-6)
     safe_nugget = max(float(nugget), 0.0)
 
-    if model == "Gaussian":
-        covariance = safe_sill * torch.exp(-3.0 * (h / safe_range) ** 2)
-    elif model == "Exponential":
-        covariance = safe_sill * torch.exp(-3.0 * h / safe_range)
-    else:
-        ratio = h / safe_range
-        covariance = torch.where(h <= safe_range, safe_sill * (1.0 - (1.5 * ratio - 0.5 * ratio**3)), torch.zeros_like(h))
-
-    spectrum = torch.abs(torch.fft.fft2(covariance))
+    sqrt_spectrum_np = _sqrt_spectrum_numpy(
+        shape=shape,
+        dx=dx,
+        dy=dy,
+        model=model,
+        range_val=safe_range,
+        nugget=safe_nugget,
+        sill=safe_sill,
+    )
+    sqrt_spectrum = torch.tensor(sqrt_spectrum_np, device=device, dtype=torch.float32)
     white_noise = torch.randn(shape, device=device, dtype=torch.float32)
-    spatial_field = torch.real(torch.fft.ifft2(torch.fft.fft2(white_noise) * torch.sqrt(spectrum)))
+    spatial_field = torch.real(torch.fft.ifft2(torch.fft.fft2(white_noise) * sqrt_spectrum))
 
     spatial_std = float(torch.std(spatial_field).item())
     if spatial_std > 0:
@@ -263,13 +294,8 @@ def compute_trap_statistics(
         total_volume = float(np.sum((spill_depth - depth_map[trap_mask])) * cell_area)
 
         sampled_thickness = max(10.0, float(rng.normal(thickness_mean, thickness_std)))
-        base_depth_map = depth_map + sampled_thickness
-        base_mask = trap_mask & (base_depth_map < spill_depth)
-
-        if np.any(base_mask):
-            base_volume = float(np.sum((spill_depth - base_depth_map[base_mask])) * cell_area)
-        else:
-            base_volume = 0.0
+        relative_depth = spill_depth - depth_map[trap_mask] - sampled_thickness
+        base_volume = float(np.sum(np.clip(relative_depth, a_min=0.0, a_max=None)) * cell_area)
 
         grv[map_idx] = max(0.0, total_volume - base_volume)
         if progress_cb is not None:
@@ -322,8 +348,30 @@ def _extract_line_values(data_2d: np.ndarray, x_values: np.ndarray, y_values: np
 
 def extract_section_stack(depth_stack: np.ndarray, final_depth_map: np.ndarray, x_values: np.ndarray, y_values: np.ndarray, angle_deg: float, n_samples: int = 260) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     distance, final_section = _extract_line_values(final_depth_map, x_values, y_values, angle_deg, n_samples=n_samples)
-    section_stack = np.empty((depth_stack.shape[0], len(distance)), dtype=np.float32)
-    for idx in range(depth_stack.shape[0]):
-        _, vals = _extract_line_values(depth_stack[idx], x_values, y_values, angle_deg, n_samples=n_samples)
-        section_stack[idx] = vals
+
+    center_x, center_y = float(np.mean(x_values)), float(np.mean(y_values))
+    x_span = float(np.max(x_values) - np.min(x_values))
+    y_span = float(np.max(y_values) - np.min(y_values))
+    half_len = 0.5 * np.sqrt(x_span**2 + y_span**2)
+
+    phi = np.deg2rad((angle_deg + 90.0) % 360.0)
+    t = np.linspace(-half_len, half_len, n_samples)
+    x_line = center_x + t * np.cos(phi)
+    y_line = center_y + t * np.sin(phi)
+
+    x_idx = np.interp(x_line, x_values, np.arange(len(x_values)))
+    y_idx = np.interp(y_line, y_values, np.arange(len(y_values)))
+
+    n_maps = depth_stack.shape[0]
+    map_idx = np.broadcast_to(np.arange(n_maps, dtype=float)[:, None], (n_maps, n_samples))
+    y_idx_2d = np.broadcast_to(y_idx, (n_maps, n_samples))
+    x_idx_2d = np.broadcast_to(x_idx, (n_maps, n_samples))
+
+    section_stack = map_coordinates(
+        depth_stack,
+        [map_idx, y_idx_2d, x_idx_2d],
+        order=1,
+        mode="nearest",
+    ).astype(np.float32, copy=False)
+
     return distance, final_section, section_stack

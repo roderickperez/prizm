@@ -102,8 +102,12 @@ The simulation pipeline:
 Performance details:
 
 - stochastic field generation is handled in `core/engine.py`
+- covariance FFT spectrum is cached per variogram/shape setting (avoids recomputation across realizations)
+- FFT operations use `scipy.fft` with multi-core workers for faster transforms
 - optional Torch FFT path is used when enabled and available
 - app-level stack and trap caches avoid recomputation when parameters are unchanged
+- structural section extraction is vectorized across all realizations (single interpolator call)
+- trap volumetrics avoids full-map temporary allocations in per-realization loop
 - Monte Carlo progress is exposed in the UI progress bar
 
 ### Step E — Depth Conversion
