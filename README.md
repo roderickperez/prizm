@@ -185,6 +185,40 @@ http://localhost:5006/structuralUncertainty
 
 ---
 
+### J) CheckShot QC
+
+Regular mode (Petrel/PWR data or default runtime):
+
+```bash
+panel serve checkShotQC/pages/checkShot_main.py --autoreload --show --port 5014
+```
+
+URL:
+
+```text
+http://localhost:5014/checkShot_main
+```
+
+Test mode (load all split wells from `referenceDocumentation/checkShotQC/wells`):
+
+```bash
+panel serve checkShotQC/pages/checkShot_main.py --autoreload --show --port 5014 --args --test
+```
+
+Alternative test mode using env var:
+
+```bash
+PRIZM_CHECKSHOT_TEST_MODE=1 panel serve checkShotQC/pages/checkShot_main.py --autoreload --show --port 5014
+```
+
+In test mode, the app reads:
+
+```text
+referenceDocumentation/checkShotQC/wells/*.csv
+```
+
+---
+
 ## 5) Optional: pass data file from terminal (if app expects `PWR_DATA_FILE`)
 
 Some apps read data from `PWR_DATA_FILE`.

@@ -82,7 +82,7 @@ def setup_logger():
     
     # Cleanup old logs
     log_files = sorted(constants.LOGS_DIR.glob("session_*.log"), key=os.path.getmtime)
-    while len(log_files) >= 5:
+    while len(log_files) >= 10:
         os.remove(log_files.pop(0))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

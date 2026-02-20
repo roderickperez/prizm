@@ -13,6 +13,7 @@ import matplotlib.colors as mcolors
 import re 
 import warnings
 import time
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -49,13 +50,46 @@ from shared.ui.omv_theme import (  # noqa: E402
 
 is_dark_mode = is_dark_mode_from_state()
 ACCENT_COLOR = BLUE_OMV_COLOR
-DEFAULT_EXPORT_PATH = str(Path.home() / "Downloads")
+DEFAULT_EXPORT_PATH = os.environ.get("PRIZM_CHECKSHOT_DEFAULT_EXPORT_PATH", "C:\\Users\\Windows\\Downloads\\")
 section_header_background = NEON_OMV_COLOR
 section_body_background = DARK_BLUE_OMV_COLOR if is_dark_mode else "white"
 section_text_color = get_content_text_color(is_dark_mode)
 
 TEST_MODE = ("--test" in sys.argv) or (os.environ.get("PRIZM_CHECKSHOT_TEST_MODE", "0") in {"1", "true", "True"})
 TEST_WELLS_DIR = ROOT_DIR / "referenceDocumentation" / "checkShotQC" / "wells"
+APP_LOGS_DIR = ROOT_DIR / "checkShotQC" / "logs"
+
+
+def _setup_app_logger() -> logging.Logger:
+    APP_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_files = sorted(APP_LOGS_DIR.glob("session_*.log"), key=lambda path: path.stat().st_mtime)
+    while len(log_files) >= 10:
+        oldest = log_files.pop(0)
+        try:
+            oldest.unlink()
+        except Exception:
+            pass
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = APP_LOGS_DIR / f"session_{timestamp}.log"
+
+    logger = logging.getLogger("checkshot_app")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    logger.info("--- CheckShot App Session Started: %s ---", timestamp)
+    return logger
+
+
+logger = _setup_app_logger()
 
 
 def _safe_numeric(series: pd.Series) -> pd.Series:
@@ -287,12 +321,14 @@ class CheckShotApp:
             sizing_mode='stretch_width' 
         )
         self.export_file_btn = pn.widgets.Button(name='Export Files', button_type='success', sizing_mode='stretch_width')
+        self.export_file_progress = pn.indicators.Progress(name='Progress', value=0, max=100, visible=False, sizing_mode='stretch_width')
         self.export_content_selector.param.watch(self.toggle_export_settings, 'value')
 
         # --- 6. EXPORT SUMMARY ---
         self.export_sum_path_input = pn.widgets.TextInput(name='Folder Path', value=DEFAULT_EXPORT_PATH, placeholder='C:/Temp/', sizing_mode='stretch_width')
         self.export_sum_filename_input = pn.widgets.TextInput(name='File Name', placeholder='Summary_Wells', sizing_mode='stretch_width')
         self.export_sum_btn = pn.widgets.Button(name='Export Summary Wells', button_type='primary', sizing_mode='stretch_width')
+        self.export_sum_progress = pn.indicators.Progress(name='Progress', value=0, max=100, visible=False, sizing_mode='stretch_width')
 
         # --- 7. EXPORT PDF REPORT ---
         self.export_pdf_path_input = pn.widgets.TextInput(name='Folder Path', value=DEFAULT_EXPORT_PATH, placeholder='C:/Temp/', sizing_mode='stretch_width')
@@ -310,6 +346,7 @@ class CheckShotApp:
             sizing_mode='stretch_width' 
         )
         self.export_pdf_btn = pn.widgets.Button(name='Export PDF Report', button_type='primary', sizing_mode='stretch_width')
+        self.export_pdf_progress = pn.indicators.Progress(name='Progress', value=0, max=100, visible=False, sizing_mode='stretch_width')
 
         # --- 8. EXPORT PLOT IMAGES ---
         self.export_imgs_path_input = pn.widgets.TextInput(name='Folder Path', value=DEFAULT_EXPORT_PATH, placeholder='C:/Temp/', sizing_mode='stretch_width')
@@ -335,6 +372,7 @@ class CheckShotApp:
             name='Format', options=['.png', '.jpg'], value='.png', sizing_mode='stretch_width'
         )
         self.export_imgs_btn = pn.widgets.Button(name='Export CheckShot Plot Images', button_type='primary', sizing_mode='stretch_width')
+        self.export_imgs_progress = pn.indicators.Progress(name='Progress', value=0, max=100, visible=False, sizing_mode='stretch_width')
 
         # --- 9. WELL PARAMETERS ---
         self.inp_srd = pn.widgets.FloatInput(name="Seismic Reference Datum (SRD) [ft]", value=0.0, step=1.0, sizing_mode='stretch_width')
@@ -358,19 +396,19 @@ class CheckShotApp:
             title="Export to Petrel", collapsed=True
         )
         self.export_file_card = self._create_sidebar_card(
-            pn.Column(self.export_path_input, self.export_filename_input, pn.pane.Markdown("**Content:**"), self.export_content_selector, pn.pane.Markdown("**Format:**"), self.export_fmt_selector, pn.pane.Markdown("**Data Selection (Short Only):**"), self.export_file_depth_ref, self.export_file_time_ref, pn.Spacer(height=5), self.export_file_btn, sizing_mode='stretch_width'),
+            pn.Column(self.export_path_input, self.export_filename_input, pn.pane.Markdown("**Content:**"), self.export_content_selector, pn.pane.Markdown("**Format:**"), self.export_fmt_selector, pn.pane.Markdown("**Data Selection (Short Only):**"), self.export_file_depth_ref, self.export_file_time_ref, pn.Spacer(height=5), self.export_file_btn, self.export_file_progress, sizing_mode='stretch_width'),
             title="Export CheckShot Files", collapsed=True
         )
         self.export_summary_card = self._create_sidebar_card(
-            pn.Column(self.export_sum_path_input, self.export_sum_filename_input, pn.Spacer(height=5), self.export_sum_btn, sizing_mode='stretch_width'),
+            pn.Column(self.export_sum_path_input, self.export_sum_filename_input, pn.Spacer(height=5), self.export_sum_btn, self.export_sum_progress, sizing_mode='stretch_width'),
             title="Export Summary Wells", collapsed=True
         )
         self.export_pdf_card = self._create_sidebar_card(
-            pn.Column(self.export_pdf_path_input, self.export_pdf_filename_input, pn.pane.Markdown("**Settings:**"), self.export_pdf_x_selector, self.export_pdf_depth_ref, pn.Spacer(height=5), self.export_pdf_btn, sizing_mode='stretch_width'),
+            pn.Column(self.export_pdf_path_input, self.export_pdf_filename_input, pn.pane.Markdown("**Settings:**"), self.export_pdf_x_selector, self.export_pdf_depth_ref, pn.Spacer(height=5), self.export_pdf_btn, self.export_pdf_progress, sizing_mode='stretch_width'),
             title="Export PDF Report", collapsed=True
         )
         self.export_imgs_card = self._create_sidebar_card(
-            pn.Column(self.export_imgs_path_input, self.export_imgs_filename_input, pn.pane.Markdown("**Data:**"), self.export_imgs_type_selector, self.export_imgs_depth_ref, pn.pane.Markdown("**Settings:**"), self.export_imgs_dpi_selector, self.export_imgs_fmt_selector, pn.Spacer(height=10), self.export_imgs_btn, sizing_mode='stretch_width'),
+            pn.Column(self.export_imgs_path_input, self.export_imgs_filename_input, pn.pane.Markdown("**Data:**"), self.export_imgs_type_selector, self.export_imgs_depth_ref, pn.pane.Markdown("**Settings:**"), self.export_imgs_dpi_selector, self.export_imgs_fmt_selector, pn.Spacer(height=10), self.export_imgs_btn, self.export_imgs_progress, sizing_mode='stretch_width'),
             title="Export CheckShot Plot Images", collapsed=True
         )
 
@@ -476,7 +514,8 @@ class CheckShotApp:
                     if not meta_df.empty and 'ProjectName' in meta_df.columns:
                         proj = str(meta_df.iloc[0]['ProjectName'])
                 con.close()
-            except Exception as e: print(f"Data load error: {e}")
+            except Exception as e:
+                logger.exception("Data load error: %s", e)
         
         # Ensure parameter columns exist in memory df even if not in DB initially
         required_params = ['KB', 'GL', 'SRD', 'DF', 'SE', 'SO', 'Vc']
@@ -506,6 +545,21 @@ class CheckShotApp:
             rgb = cmap(i % 20)
             colors_dict[w] = mcolors.to_hex(rgb)
         return colors_dict
+
+    def _get_enabled_wells(self) -> list[str]:
+        if self.df_headers.empty:
+            return []
+
+        try:
+            table_df = self.all_wells_table.value
+            if isinstance(table_df, pd.DataFrame) and 'WellName' in table_df.columns and 'Plot' in table_df.columns:
+                enabled = table_df[table_df['Plot'] == True]['WellName'].astype(str).tolist()
+                if enabled:
+                    return enabled
+        except Exception:
+            pass
+
+        return self.df_headers['WellName'].astype(str).tolist()
 
     def on_plot_mode_change(self, event):
         is_single = (event.new == 'Single Well')
@@ -835,6 +889,7 @@ class CheckShotApp:
             self.well_selector.param.trigger('value')
             
         except Exception as e:
+            logger.exception("Import error for well %s: %s", well_target, e)
             pn.state.notifications.error(f"Import Error: {e}", duration=4000)
 
     def run_save(self, event):
@@ -913,6 +968,7 @@ class CheckShotApp:
             con.close()
             pn.state.notifications.success(f"Saved Params to DB", duration=3000)
         except Exception as e:
+            logger.exception("DB save error for well %s: %s", well_name, e)
             pn.state.notifications.error(f"DB Save Error: {e}", duration=5000)
 
         # 2. Export to Petrel (Called by Save button)
@@ -979,7 +1035,7 @@ class CheckShotApp:
                         
                 except Exception as e:
                     # Log but continue
-                    print(f"Warning: Could not set attribute {attr_name}: {e}")
+                    logger.warning("Could not set attribute %s for well %s: %s", attr_name, well_name, e)
 
             # C. Export Checkshot Log
             params = {'kb': self.inp_kb.value, 'gl': self.inp_gl.value, 'srd': self.inp_srd.value, 
@@ -1020,6 +1076,7 @@ class CheckShotApp:
                 self.export_petrel_status.object = "No calc data to export."
 
         except Exception as e:
+            logger.exception("Petrel export error for well %s: %s", well_name, e)
             self.export_petrel_status.object = f"Error: {e}"
             pn.state.notifications.error(f"Petrel Export Error: {e}", duration=5000)
 
@@ -1029,6 +1086,8 @@ class CheckShotApp:
         filename = self.export_filename_input.value
         file_ext = self.export_fmt_selector.value
         content_mode = self.export_content_selector.value
+        self.export_file_progress.visible = True
+        self.export_file_progress.value = 0
         
         if not folder or not filename:
             pn.state.notifications.error("Export Failed: Check path/filename", duration=4000)
@@ -1039,7 +1098,14 @@ class CheckShotApp:
         srd_val, vc_val = self.inp_srd.value, self.inp_vc.value
         
         try:
-            for w in self.df_headers['WellName'].unique():
+            os.makedirs(folder, exist_ok=True)
+            wells_to_export = self._get_enabled_wells()
+            if not wells_to_export:
+                pn.state.notifications.warning("No wells selected in All Wells List", duration=4000)
+                return
+            total_wells = max(1, len(wells_to_export))
+
+            for idx, w in enumerate(wells_to_export, start=1):
                 row = self.df_headers[self.df_headers['WellName'] == w]
                 kb_val = float(row.iloc[0]['KB']) if not row.empty else 0.0
                 params = {'kb': kb_val, 'gl': self.inp_gl.value, 'srd': srd_val, 'se': self.inp_se.value, 'so': self.inp_so.value, 'vc': vc_val, 'df': self.inp_df.value}
@@ -1117,9 +1183,13 @@ END HEADER
                         f.write(header_template)
                         sep = ',' if file_ext == '.csv' else '\t'
                         exp_df[['Depth', 'Time', 'Well name']].round(2).to_csv(f, index=False, header=False, sep=sep)
+
+                self.export_file_progress.value = int((idx / total_wells) * 100)
             
+            self.export_file_progress.value = 100
             pn.state.notifications.success(f"Exported files to {folder}", duration=4000)
         except Exception as e:
+            logger.exception("File export error to folder %s: %s", folder, e)
             pn.state.notifications.error(f"Error: {e}", duration=4000)
 
     def run_export_summary(self, event):
@@ -1127,24 +1197,37 @@ END HEADER
         folder = self.export_sum_path_input.value
         filename = self.export_sum_filename_input.value
         if not folder or not filename: return
+        self.export_sum_progress.visible = True
+        self.export_sum_progress.value = 10
+        os.makedirs(folder, exist_ok=True)
         full_path = os.path.join(folder, f"{filename}.csv")
-        df_exp = self.df_headers.copy()
+        selected_wells = self._get_enabled_wells()
+        if not selected_wells:
+            pn.state.notifications.warning("No wells selected in All Wells List", duration=4000)
+            return
+
+        df_exp = self.df_headers[self.df_headers['WellName'].isin(selected_wells)].copy()
         df_exp = df_exp.rename(columns={'WellName': 'Well Name'})
         required = ['Well Name', 'UWI', 'X', 'Y', 'Lat', 'Long', 'SRD', 'KB', 'DF', 'GL', 'SE', 'SO', 'Vc']
         for c in required: 
             if c not in df_exp.columns: df_exp[c] = 0.0
         try:
             df_exp[required].to_csv(full_path, index=False)
+            self.export_sum_progress.value = 100
             pn.state.notifications.success(f"Summary saved", duration=4000)
-        except: pass
+        except Exception as e:
+            logger.exception("Summary export error to %s: %s", full_path, e)
+            pn.state.notifications.error(f"Summary export error: {e}", duration=4000)
 
     def run_export_pdf(self, event): 
         folder = self.export_pdf_path_input.value
         filename = self.export_pdf_filename_input.value
-        plot_select = self.export_pdf_x_selector.value
         depth_ref = self.export_pdf_depth_ref.value
+        self.export_pdf_progress.visible = True
+        self.export_pdf_progress.value = 0
         
         if not folder or not filename: return
+        os.makedirs(folder, exist_ok=True)
         full_path = os.path.join(folder, f"{filename}.pdf")
         pn.state.notifications.info(f"Generating PDF...", duration=2000)
 
@@ -1152,6 +1235,10 @@ END HEADER
             c = canvas.Canvas(full_path, pagesize=landscape(A4))
             width, height = landscape(A4)
             g_params = {'gl': self.inp_gl.value, 'srd': self.inp_srd.value, 'se': self.inp_se.value, 'so': self.inp_so.value, 'vc': self.inp_vc.value, 'df': self.inp_df.value}
+            selected_wells = self._get_enabled_wells()
+            if not selected_wells:
+                pn.state.notifications.warning("No wells selected in All Wells List", duration=4000)
+                return
             
             def draw_logo(c):
                 if valid_logo:
@@ -1159,14 +1246,8 @@ END HEADER
                     c.drawImage(valid_logo, width - logo_w - 0.5*inch, height - logo_h - 0.3*inch, width=logo_w, height=logo_h, preserveAspectRatio=True, mask='auto')
 
             def create_plot_strip(target_well=None, all_wells_data=None):
-                is_single_plot = plot_select != 'All (4-Panel)'
-                if is_single_plot:
-                    fig, ax = plt.subplots(figsize=(6, 5))
-                    axes = [ax]
-                    titles = [plot_select]
-                else:
-                    fig, axes = plt.subplots(1, 4, figsize=(10, 5))
-                    titles = ["OWT (ms)", "TWT (ms)", "Interval Vel (ft/s)", "Average Vel (ft/s)"]
+                fig, axes = plt.subplots(1, 4, figsize=(10, 5))
+                titles = ["OWT (ms)", "TWT (ms)", "Interval Vel (ft/s)", "Average Vel (ft/s)"]
                 
                 y_key = 'Depth_DF'
                 if depth_ref == 'Depth from KB': y_key = 'Depth_KB'
@@ -1217,7 +1298,7 @@ END HEADER
                 plt.close(fig)
                 return img_data
 
-            all_wells_list = self.df_headers['WellName'].unique()
+            all_wells_list = selected_wells
             precomputed_data = []
             for w in all_wells_list:
                 row = self.df_headers[self.df_headers['WellName'] == w]
@@ -1226,35 +1307,91 @@ END HEADER
                 w_params['kb'] = kb_val
                 precomputed_data.append((w, self.compute_geophysics(w, w_params)))
 
+            total_steps = max(1, 2 + len(precomputed_data))
+            completed_steps = 0
+
+            def bump_progress():
+                nonlocal completed_steps
+                completed_steps += 1
+                self.export_pdf_progress.value = int((completed_steps / total_steps) * 100)
+
+            # PAGE 1: Table only
             draw_logo(c)
             c.setFont("Helvetica-Bold", 16)
             c.drawString(0.5*inch, height - 0.8*inch, f"Project Summary: {self.project_name}")
             
             table_data = [['Well Name', 'UWI', 'X', 'Y', 'Lat', 'Long', 'SRD', 'KB', 'DF', 'GL', 'SE', 'SO', 'Vc']]
-            for i, row in self.df_headers.iterrows():
+            headers_filtered = self.df_headers[self.df_headers['WellName'].isin(selected_wells)]
+            for i, row in headers_filtered.iterrows():
                 r_data = [row.get('WellName', ''), row.get('UWI', ''), f"{row.get('X', 0):.1f}", f"{row.get('Y', 0):.1f}", f"{row.get('Lat', 0):.4f}", f"{row.get('Long', 0):.4f}", g_params['srd'], row.get('KB', 0), self.inp_df.value, g_params['gl'], g_params['se'], g_params['so'], g_params['vc']]
                 table_data.append([str(x) for x in r_data])
             t = Table(table_data, colWidths=[1.2*inch, 1.2*inch] + [0.7*inch]*11)
             t.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.Color(5/255, 39/255, 89/255)), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,0), 8), ('BOTTOMPADDING', (0,0), (-1,0), 6), ('BACKGROUND', (0,1), (-1,-1), colors.white), ('GRID', (0,0), (-1,-1), 1, colors.black), ('FONTSIZE', (0,1), (-1,-1), 7)]))
             w_tab, h_tab = t.wrapOn(c, width, height)
             t.drawOn(c, 0.5*inch, height - 1.0*inch - h_tab)
-
-            plot_img = create_plot_strip(target_well=None, all_wells_data=precomputed_data)
-            c.drawImage(ImageReader(plot_img), 0.5*inch, 0.5*inch, width=width-1*inch, height=4.5*inch)
+            bump_progress()
             c.showPage()
 
+            # PAGE 2: All wells 4-panel plot
+            draw_logo(c)
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(0.5*inch, height - 0.8*inch, "All Wells - 4 Panel")
+            plot_img = create_plot_strip(target_well=None, all_wells_data=precomputed_data)
+            c.drawImage(ImageReader(plot_img), 0.5*inch, 0.7*inch, width=width-1*inch, height=5.8*inch)
+            bump_progress()
+            c.showPage()
+
+            # PAGE 3..N: each well with 4-panel plot
             for w_name, w_df in precomputed_data:
                 draw_logo(c)
                 c.setFont("Helvetica-Bold", 18)
                 c.drawString(0.5*inch, height - 1.0*inch, f"Well: {w_name}")
+
+                row = self.df_headers[self.df_headers['WellName'] == w_name]
+                if not row.empty:
+                    row = row.iloc[0]
+                    one_well_table = [[
+                        'Well Name', 'UWI', 'X', 'Y', 'Lat', 'Long', 'SRD', 'KB', 'DF', 'GL', 'SE', 'SO', 'Vc'
+                    ], [
+                        str(row.get('WellName', '')),
+                        str(row.get('UWI', '')),
+                        f"{row.get('X', 0):.1f}",
+                        f"{row.get('Y', 0):.1f}",
+                        f"{row.get('Lat', 0):.4f}",
+                        f"{row.get('Long', 0):.4f}",
+                        str(g_params['srd']),
+                        str(row.get('KB', 0)),
+                        str(self.inp_df.value),
+                        str(g_params['gl']),
+                        str(g_params['se']),
+                        str(g_params['so']),
+                        str(g_params['vc']),
+                    ]]
+                    t_well = Table(one_well_table, colWidths=[1.2*inch, 1.2*inch] + [0.7*inch]*11)
+                    t_well.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(5/255, 39/255, 89/255)),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 8),
+                        ('BACKGROUND', (0, 1), (-1, 1), colors.white),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('FONTSIZE', (0, 1), (-1, 1), 7),
+                    ]))
+                    t_w, t_h = t_well.wrapOn(c, width, height)
+                    t_well.drawOn(c, 0.5*inch, height - 1.55*inch - t_h)
+
                 if not w_df.empty:
                     p_buf = create_plot_strip(target_well=w_name, all_wells_data=precomputed_data)
-                    c.drawImage(ImageReader(p_buf), 0.5*inch, height - 7.0*inch, width=width-1*inch, height=4.5*inch)
+                    c.drawImage(ImageReader(p_buf), 0.5*inch, 0.6*inch, width=width-1*inch, height=4.0*inch)
+                bump_progress()
                 c.showPage()
 
             c.save()
+            self.export_pdf_progress.value = 100
             pn.state.notifications.success("PDF Generated", duration=4000)
         except Exception as e:
+            logger.exception("PDF export error to %s: %s", full_path, e)
             pn.state.notifications.error(f"PDF Error: {e}", duration=4000)
 
     def run_export_imgs(self, event): 
@@ -1264,11 +1401,17 @@ END HEADER
         depth_ref = self.export_imgs_depth_ref.value 
         dpi = int(self.export_imgs_dpi_selector.value)
         fmt = self.export_imgs_fmt_selector.value
+        self.export_imgs_progress.visible = True
+        self.export_imgs_progress.value = 0
         
         if not folder or not filename: return
         pn.state.notifications.info(f"Exporting Images...", duration=2000)
+        os.makedirs(folder, exist_ok=True)
 
-        all_wells_list = self.df_headers['WellName'].unique()
+        all_wells_list = self._get_enabled_wells()
+        if not all_wells_list:
+            pn.state.notifications.warning("No wells selected in All Wells List", duration=4000)
+            return
         g_params = {'gl': self.inp_gl.value, 'srd': self.inp_srd.value, 'se': self.inp_se.value, 'so': self.inp_so.value, 'vc': self.inp_vc.value, 'df': self.inp_df.value}
         precomputed_data = []
         for w in all_wells_list:
@@ -1313,16 +1456,27 @@ END HEADER
             return fig
 
         try:
+            total_exports = max(1, len(precomputed_data) + 1)
+            completed_exports = 0
+
             fig_all = generate_plot(None)
             fig_all.savefig(os.path.join(folder, f"{filename}_all{fmt}"), dpi=dpi)
             plt.close(fig_all)
+            completed_exports += 1
+            self.export_imgs_progress.value = int((completed_exports / total_exports) * 100)
+
             for w, _ in precomputed_data:
                 safe = re.sub(r'[\\/*?:"<>|]', '_', w)
                 fig = generate_plot(w)
                 fig.savefig(os.path.join(folder, f"{filename}_well_{safe}{fmt}"), dpi=dpi)
                 plt.close(fig)
+                completed_exports += 1
+                self.export_imgs_progress.value = int((completed_exports / total_exports) * 100)
+
+            self.export_imgs_progress.value = 100
             pn.state.notifications.success("Images Exported", duration=4000)
         except Exception as e:
+            logger.exception("Image export error to folder %s: %s", folder, e)
             pn.state.notifications.error(f"Error: {e}", duration=4000)
 
     # --- TEMPLATE GENERATION ---
@@ -1407,6 +1561,8 @@ END HEADER
 app = CheckShotApp()
 template = app.get_template()
 template.servable()
+
+logger.info("CheckShot app initialized. Test mode: %s", TEST_MODE)
 
 if TEST_MODE:
     pn.state.notifications.info(f"Test mode enabled: loaded wells from {TEST_WELLS_DIR}", duration=6000)
