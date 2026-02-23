@@ -82,6 +82,7 @@ try:
         BLUE_OMV_COLOR,
         DARK_BLUE_OMV_COLOR,
         DARK_MAGENTA_OMV_COLOR,
+        MAGENTA_OMV_COLOR,
         NEON_OMV_COLOR,
         docs_button_html,
         get_content_text_color,
@@ -97,6 +98,7 @@ except ImportError:
     BLUE_OMV_COLOR = "#005A9B"
     DARK_BLUE_OMV_COLOR = "#003056"
     DARK_MAGENTA_OMV_COLOR = "#4536a2"
+    MAGENTA_OMV_COLOR = "#8848ea"
     NEON_OMV_COLOR = "#00E5FF"
 
     def docs_button_html(_url: str) -> str:
@@ -1089,9 +1091,9 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         t_vals = np.clip(t_vals, -half_len, half_len)
         well_dist = t_vals + half_len
         well_depth = np.interp(well_dist, section_x, final_section)
-        ax_section.scatter(well_dist, well_depth, c=DARK_MAGENTA_OMV_COLOR, edgecolors=DARK_MAGENTA_OMV_COLOR, s=40, zorder=9)
+        ax_section.scatter(well_dist, well_depth, c=MAGENTA_OMV_COLOR, edgecolors="black", s=40, zorder=9)
         for wx in well_dist:
-            ax_section.axvline(float(wx), color=DARK_MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, alpha=0.9)
+            ax_section.axvline(float(wx), color=MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, alpha=0.9)
         for idx, (wd, wz) in enumerate(zip(well_dist, well_depth)):
             label = well_names[idx] if idx < len(well_names) else f"Well_{idx+1}"
             ax_section.annotate(label, (wd, wz), xytext=(0, 9), textcoords="offset points", color=DARK_MAGENTA_OMV_COLOR, fontsize=8, fontweight="bold", ha="center")
@@ -1109,7 +1111,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     ax_section.set_ylabel("Depth (m)")
     ax_section.yaxis.labelpad = 2
     if well_x_m.size > 0:
-        ax_section.plot([], [], color=DARK_MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, label="Well location (dashed magenta)")
+        ax_section.plot([], [], color=MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, label="Well location (dashed magenta)")
     ax_section.legend(loc="upper right", fontsize=8)
     ax_section.grid(alpha=0.25)
 
@@ -1698,6 +1700,7 @@ txt_export_petrel_surface_name = pn.widgets.TextInput(
 chk_export_average_mean = pn.widgets.Checkbox(name="Average Velocity Map", value=True)
 chk_export_final_depth = pn.widgets.Checkbox(name="Final Depth", value=True)
 chk_export_final_depth_contour = pn.widgets.Checkbox(name="Final Depth Contour Map", value=True)
+chk_export_spill_contour_line = pn.widgets.Checkbox(name="Spill Contour Line (red dashed)", value=True)
 chk_export_isoprobability = pn.widgets.Checkbox(name="Isoprobability", value=True)
 chk_export_all_realizations = pn.widgets.Checkbox(name="All realization maps (N)", value=False)
 btn_export_petrel_surface = pn.widgets.Button(
@@ -1902,10 +1905,10 @@ def plot_top_right_section(*_args):
             )
             section_hover = HoverTool(tooltips=[("Well", "@well_name"), ("Distance", "@Distance{0,0.00}"), ("Depth", "@Depth{0,0.00}")])
             section_overlay = section_overlay * hv.Points(section_wells, kdims=["Distance", "Depth"], vdims=["well_name"]).opts(
-                color=DARK_MAGENTA_OMV_COLOR,
+                color=MAGENTA_OMV_COLOR,
                 size=8,
                 marker="circle",
-                line_color=DARK_MAGENTA_OMV_COLOR,
+                line_color="black",
                 tools=[section_hover],
             )
             section_overlay = section_overlay * hv.Labels(section_wells, kdims=["Distance", "Depth"], vdims=["well_name"]).opts(
@@ -1919,7 +1922,7 @@ def plot_top_right_section(*_args):
             for idx, well_x in enumerate(distance_vals):
                 line_label = "Well location (dashed magenta)" if idx == 0 else ""
                 section_overlay = section_overlay * hv.VLine(float(well_x), label=line_label).opts(
-                    color=DARK_MAGENTA_OMV_COLOR,
+                    color=MAGENTA_OMV_COLOR,
                     line_dash="dashed",
                     line_width=1.6,
                     alpha=0.9,
@@ -2045,6 +2048,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
     if chk_close_poly.value:
         try:
             red_contour = depth_da.hvplot.contour(levels=[deterministic_spill], cmap=["red"]).opts(line_width=3, line_dash="dashed")
+            av_overlay = av_overlay * red_contour
             overlay = overlay * red_contour
         except Exception:
             logger.warning("Final depth contour rendering skipped due to contour level/data mismatch")
@@ -2642,6 +2646,15 @@ def _export_surface_to_petrel(_event) -> None:
             contour_map = np.asarray(final_depth_map, dtype=float)
             contour_map = np.where(np.isfinite(contour_map), np.round(contour_map / contour_step_m) * contour_step_m, np.nan)
             selected_surfaces.append((f"{prefix}_FinalDepthContour", contour_map.T))
+        if chk_export_spill_contour_line.value:
+            deterministic_spill, _, _ = core_get_trap_and_spill(final_depth_map, _depth_step_m())
+            line_half_width = max(float(sld_depth_contours.value) * _depth_unit_to_m() * 0.5, 0.1)
+            contour_line_surface = np.where(
+                np.abs(np.asarray(final_depth_map, dtype=float) - float(deterministic_spill)) <= line_half_width,
+                float(deterministic_spill),
+                np.nan,
+            )
+            selected_surfaces.append((f"{prefix}_SpillContourLine", contour_line_surface.T))
         if chk_export_isoprobability.value:
             selected_surfaces.append((f"{prefix}_Isoprobability", np.asarray(prob_array, dtype=float).T))
         if chk_export_all_realizations.value:
@@ -2863,6 +2876,7 @@ card_7 = create_sidebar_card(
     chk_export_average_mean,
     chk_export_final_depth,
     chk_export_final_depth_contour,
+    chk_export_spill_contour_line,
     chk_export_isoprobability,
     chk_export_all_realizations,
     btn_export_petrel_surface,
