@@ -5,17 +5,23 @@ import panel as pn
 import plotly.express as px
 
 
-def _kpi_card(title: str, value: int, color: str) -> pn.Column:
-    return pn.Column(
-        pn.pane.Markdown(
-            f"""
-            <div style='background:white;border-radius:8px;padding:12px 16px;border:1px solid #d5d6d6;'>
-              <div style='font-size:14px;color:#6b7280;'>{title}</div>
-              <div style='font-size:32px;font-weight:700;color:{color};'>{value}</div>
-            </div>
-            """
-        ),
+def _kpi_card(title: str, value: int, color: str) -> pn.Card:
+    body = pn.pane.HTML(
+        f"""
+        <div style='padding: 8px 6px 4px 6px;'>
+            <div style='font-size:16px; color:#6b7280; margin-bottom:10px;'>{title}</div>
+            <div style='font-size:44px; font-weight:700; color:{color}; line-height:1.0;'>{value}</div>
+        </div>
+        """,
+        sizing_mode="stretch_both",
+    )
+    return pn.Card(
+        body,
+        title="",
+        hide_header=True,
         sizing_mode="stretch_width",
+        min_height=170,
+        styles={"background": "white", "border": "1px solid #d5d6d6", "border-radius": "8px"},
     )
 
 
@@ -40,7 +46,7 @@ def build_page(service) -> pn.Column:
             hover_name="well_name",
             mapbox_style="open-street-map",
             zoom=4,
-            height=650,
+            height=500,
         )
         fig.update_traces(marker={"size": 10, "color": "#007733"})
         fig.update_layout(margin={"l": 0, "r": 0, "t": 0, "b": 0})
@@ -50,11 +56,22 @@ def build_page(service) -> pn.Column:
         _kpi_card("Number of well logs", counts["logs"], "#335290"),
         _kpi_card("Number of well tops", counts["tops"], "#8848ea"),
         sizing_mode="stretch_width",
+        margin=(4, 0, 14, 0),
+        styles={"gap": "24px"},
+    )
+
+    map_box = pn.Card(
+        pn.pane.Plotly(fig, sizing_mode="stretch_width", min_height=500),
+        title="Well Locations",
+        collapsed=False,
+        hide_header=False,
+        sizing_mode="stretch_width",
+        styles={"background": "white", "border": "1px solid #d5d6d6", "border-radius": "8px"},
     )
 
     return pn.Column(
         pn.pane.Markdown("# Project Summary"),
         kpis,
-        pn.pane.Plotly(fig, sizing_mode="stretch_both", min_height=650),
-        sizing_mode="stretch_both",
+        map_box,
+        sizing_mode="stretch_width",
     )

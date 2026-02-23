@@ -1637,7 +1637,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
             if vmax > vmin:
                 levels = np.arange(vmin, vmax, step_val)
                 if len(levels) > 0:
-                    white_contours = depth_da.hvplot.contour(levels=list(levels), color="black", line_width=1, alpha=0.8)
+                    white_contours = depth_da.hvplot.contour(levels=list(levels), color="white", line_width=1, alpha=0.8)
                     overlay = overlay * white_contours
         except Exception:
             logger.warning("Final depth white contour rendering skipped")

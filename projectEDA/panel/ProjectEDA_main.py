@@ -54,6 +54,30 @@ _PROJECT_EDA_SIDEBAR_CSS = """
 #sidebar .projecteda-nav-card .bk-panel-models-layout-Card-body {
     min-height: 8px;
 }
+
+#sidebar .projecteda-nav-link {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    text-decoration: none;
+    background: #39e75f;
+    color: #003056;
+    border: 1px solid #39e75f;
+    font-weight: 600;
+    text-align: left;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+}
+
+#sidebar .projecteda-nav-link:hover {
+    filter: brightness(0.95);
+}
+
+#sidebar .projecteda-nav-link.active {
+    outline: 2px solid #003056;
+    outline-offset: 1px;
+}
 """
 
 pn.extension(
@@ -87,10 +111,51 @@ PAGES = {
     "Well Tops": well_tops.build_page,
 }
 
+PAGE_SLUGS = {
+    "Project Summary": "project-summary",
+    "Log Standardization": "log-standardization",
+    "Gantt Chart": "gantt-chart",
+    "Wells": "wells",
+    "Global Logs": "global-logs",
+    "Single Log": "single-log",
+    "Multi Well Plot": "multi-well-plot",
+    "Well Tops": "well-tops",
+}
+SLUG_TO_PAGE = {slug: page for page, slug in PAGE_SLUGS.items()}
+
+
+def _initial_page_from_session() -> str:
+    try:
+        args = getattr(pn.state, "session_args", {}) or {}
+        raw = args.get("page", [b""])
+        if not raw:
+            return "Project Summary"
+        token = raw[0]
+        slug = token.decode("utf-8") if isinstance(token, (bytes, bytearray)) else str(token)
+        return SLUG_TO_PAGE.get(slug, "Project Summary")
+    except Exception:
+        return "Project Summary"
+
+
+active_page_name = _initial_page_from_session()
+active_page = pn.widgets.StaticText(name="Active Page", value=active_page_name)
+
 
 def set_page(page_name: str) -> None:
-    builder = PAGES[page_name]
-    main_content[:] = [builder(service)]
+    if page_name not in PAGES:
+        status.object = f"❌ Unknown page: {page_name}"
+        return
+
+    try:
+        builder = PAGES[page_name]
+        main_content[:] = [builder(service)]
+        active_page.value = page_name
+        if TEST_MODE:
+            status.object = f"🧪 Test mode enabled: viewing '{page_name}'."
+        else:
+            status.object = f"✅ Showing page: {page_name}"
+    except Exception as exc:
+        status.object = f"❌ Failed to open '{page_name}': {exc}"
 
 
 status = pn.pane.Markdown("", sizing_mode="stretch_width")
@@ -119,48 +184,28 @@ refresh_btn.on_click(refresh_data)
 section_body_background = DARK_BLUE_OMV_COLOR if is_dark_mode else "white"
 section_body_text = "white" if is_dark_mode else DARK_BLUE_OMV_COLOR
 
-_nav_update_lock = {"locked": False}
-
-
-def _make_nav_card(page_name: str) -> pn.Card:
-    card = pn.Card(
-        pn.pane.Markdown(" "),
-        title=page_name,
-        collapsed=True,
-        hide_header=False,
+def _make_nav_link(page_name: str) -> pn.pane.HTML:
+    slug = PAGE_SLUGS.get(page_name, "")
+    active_cls = " active" if page_name == active_page_name else ""
+    return pn.pane.HTML(
+        f"<a class='projecteda-nav-link{active_cls}' href='?page={slug}'>{page_name}</a>",
         sizing_mode="stretch_width",
-        header_background=NEON_OMV_COLOR,
-        active_header_background=NEON_OMV_COLOR,
-        header_color=DARK_BLUE_OMV_COLOR,
-        styles={"background": section_body_background, "color": section_body_text},
-        margin=(0, 0, 12, 0),
-        css_classes=["projecteda-nav-card"],
+        margin=0,
     )
 
-    def _on_toggle(event):
-        if _nav_update_lock["locked"]:
-            return
-        if event.new is False:
-            set_page(page_name)
-            _nav_update_lock["locked"] = True
-            card.collapsed = True
-            _nav_update_lock["locked"] = False
 
-    card.param.watch(_on_toggle, "collapsed")
-    return card
-
-
-nav_cards = [_make_nav_card(name) for name in PAGES]
+nav_links = [_make_nav_link(name) for name in PAGES]
 
 
 sidebar_items = [
     pn.pane.Markdown("## Sidebar"),
     refresh_btn,
     status,
-    *nav_cards,
+    active_page,
+    *nav_links,
 ]
 
-set_page("Project Summary")
+set_page(active_page_name)
 
 
 template_kwargs = dict(
@@ -171,7 +216,14 @@ template_kwargs = dict(
     main_max_width="",
     main=[main_content],
     sidebar=sidebar_items,
-    header=[pn.pane.HTML(docs_button_html("https://example.com/docs"))],
+    header=[
+        pn.Row(
+            pn.Spacer(sizing_mode="stretch_width"),
+            pn.pane.HTML(docs_button_html("https://example.com/docs")),
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+    ],
 )
 
 if constants.LOGO_PATH.exists():
