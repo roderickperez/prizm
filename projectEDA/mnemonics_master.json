@@ -1,0 +1,191 @@
+{
+  "Gamma Ray": {
+    "canonical": "Gamma Ray",
+    "aliases": ["gr", "gamma ray", "gamma", "gammaray", "gr_std", "gr cmp", "gr_cmp"],
+    "style": {"color": "#00BE00", "line_style": "solid", "scale": [0, 150]},
+    "units": ["gAPI"],
+    "description": "Gamma Ray per Standard-Log (GR_STD)."
+  },
+  "Caliper": {
+    "canonical": "Caliper",
+    "aliases": ["caliper", "cali", "hole size", "cal", "cali_std", "cali cmp", "cali_cmp"],
+    "style": {"color": "#0000FF", "line_style": "solid", "scale": [6, 26]},
+    "units": ["in", "mm"],
+    "description": "Caliper per Standard-Log (CALI_STD)."
+  },
+  "Bit Size": {
+    "canonical": "Bit Size",
+    "aliases": ["bs", "bit", "bit size", "bs_std", "bs cmp", "bs_cmp"],
+    "style": {"color": "#000000", "line_style": "dash", "scale": [6, 26]},
+    "units": ["in"],
+    "description": "Bit size per Standard-Log (BS_STD)."
+  },
+  "Sonic (DT)": {
+    "canonical": "Sonic (DT)",
+    "aliases": ["dt", "sonic", "compressional", "ac", "dt_std", "dt cmp", "dt_cmp", "dtc"],
+    "style": {"color": "#32CD32", "line_style": "solid", "scale": [240, 40]},
+    "units": ["\u00b5s/ft", "\u00b5s/m"],
+    "description": "Acoustic slowness compressional (DT_STD)."
+  },
+  "Sonic Shear (DTS)": {
+    "canonical": "Sonic Shear (DTS)",
+    "aliases": ["dts", "shear", "dt_s", "dts_std", "dts cmp", "dts_cmp"],
+    "style": {"color": "#FF0000", "line_style": "solid", "scale": [460, 60]},
+    "units": ["\u00b5s/ft", "\u00b5s/m"],
+    "description": "Acoustic slowness shear (DTS_STD)."
+  },
+  "Sonic Stoneley (DTST)": {
+    "canonical": "Sonic Stoneley (DTST)",
+    "aliases": ["dtst", "stoneley", "dtst_std", "dtst cmp", "dtst_cmp"],
+    "style": {"color": "#0000FF", "line_style": "solid", "scale": [800, 130]},
+    "units": ["\u00b5s/ft", "\u00b5s/m"],
+    "description": "Acoustic slowness Stoneley (DTST_STD)."
+  },
+  "Density": {
+    "canonical": "Density",
+    "aliases": ["density", "rho", "rhob", "rho_std", "rho cmp", "rho_cmp", "rhob_gcc"],
+    "style": {"color": "#FF0000", "line_style": "dash", "scale": [1.95, 2.95]},
+    "units": ["g/cm3", "g/cc"],
+    "description": "Formation density (RHO_STD)."
+  },
+  "Density Correction": {
+    "canonical": "Density Correction",
+    "aliases": ["drho", "delta rho", "drho_std", "drho cmp", "drho_cmp"],
+    "style": {"color": "#000000", "line_style": "dot", "scale": [-0.75, 0.25]},
+    "units": ["g/cm3"],
+    "description": "Formation density correction (DRHO_STD)."
+  },
+  "Neutron Porosity": {
+    "canonical": "Neutron Porosity",
+    "aliases": ["neutron", "neu", "nphi", "phi_n", "neu_std", "neu cmp", "neu_cmp"],
+    "style": {"color": "#0000FF", "line_style": "dash", "scale": [0.45, -0.15]},
+    "units": ["m3/m3", "v/v", "pu"],
+    "description": "Neutron porosity (NEU_STD)."
+  },
+  "PEF": {
+    "canonical": "PEF",
+    "aliases": ["pef", "photoelectric", "pe", "pef_std", "pef cmp", "pef_cmp"],
+    "style": {"color": "#A52A2A", "line_style": "solid", "scale": [0, 10]},
+    "units": ["b/e", "unitless"],
+    "description": "Photoelectric factor (PEF_STD)."
+  },
+  "Resistivity Deep": {
+    "canonical": "Resistivity Deep",
+    "aliases": ["rd", "ild", "rt", "res deep", "deep resistivity", "rd_std", "rd cmp", "rd_cmp"],
+    "style": {"color": "#FF0000", "line_style": "solid", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Deep resistivity (RD_STD)."
+  },
+  "Resistivity Medium": {
+    "canonical": "Resistivity Medium",
+    "aliases": ["rm", "ilm", "res medium", "medium resistivity", "rm_std", "rm cmp", "rm_cmp"],
+    "style": {"color": "#FF00FF", "line_style": "solid", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Medium resistivity (RM_STD)."
+  },
+  "Resistivity Shallow": {
+    "canonical": "Resistivity Shallow",
+    "aliases": ["rs", "ils", "sfl", "shallow resistivity", "rs_std", "rs cmp", "rs_cmp"],
+    "style": {"color": "#0000FF", "line_style": "solid", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Shallow resistivity (RS_STD)."
+  },
+  "Resistivity Micro": {
+    "canonical": "Resistivity Micro",
+    "aliases": ["rxo", "microres", "microlog", "rxo_std", "rxo cmp", "rxo_cmp"],
+    "style": {"color": "#000000", "line_style": "solid", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Micro resistivity (RXO_STD)."
+  },
+  "SP": {
+    "canonical": "SP",
+    "aliases": ["sp", "spontaneous potential", "sp_std", "sp cmp", "sp_cmp"],
+    "style": {"color": "#FF0000", "line_style": "solid", "scale": [-160, 40]},
+    "units": ["mV"],
+    "description": "Spontaneous potential (SP_STD)."
+  },
+  "Potassium": {
+    "canonical": "Potassium",
+    "aliases": ["pota", "k", "k_pct", "pota_std", "pota cmp", "pota_cmp"],
+    "style": {"color": "#0000FF", "line_style": "solid", "scale": [-10, 10]},
+    "units": ["%"],
+    "description": "Potassium (POTA_STD)."
+  },
+  "Thorium": {
+    "canonical": "Thorium",
+    "aliases": ["thor", "th", "thor_std", "thor cmp", "thor_cmp"],
+    "style": {"color": "#FF00FF", "line_style": "solid", "scale": [-10, 30]},
+    "units": ["ppm"],
+    "description": "Thorium (THOR_STD)."
+  },
+  "Uranium": {
+    "canonical": "Uranium",
+    "aliases": ["uran", "u", "uran_std", "uran cmp", "uran_cmp"],
+    "style": {"color": "#FF0000", "line_style": "solid", "scale": [-10, 30]},
+    "units": ["ppm"],
+    "description": "Uranium (URAN_STD)."
+  },
+  "Velocity (Compressional)": {
+    "canonical": "Velocity (Compressional)",
+    "aliases": ["velc", "vp", "velc_std", "velc cmp", "velc_cmp"],
+    "style": {"color": "#FF00FF", "line_style": "solid", "scale": [0, 8000]},
+    "units": ["m/s"],
+    "description": "Compressional velocity (VELC_STD)."
+  },
+  "Velocity (Shear)": {
+    "canonical": "Velocity (Shear)",
+    "aliases": ["vels", "vs", "vels_std", "vels cmp", "vels_cmp"],
+    "style": {"color": "#A52A2A", "line_style": "dash", "scale": [0, 5000]},
+    "units": ["m/s"],
+    "description": "Shear velocity (VELS_STD)."
+  },
+  "TVD": {
+    "canonical": "TVD",
+    "aliases": ["tvd", "true vertical depth", "tvd_std", "tvd cmp", "tvd_cmp"],
+    "style": {"color": "#00BE00", "line_style": "solid", "scale": [null, null]},
+    "units": ["m"],
+    "description": "True Vertical Depth (TVD_STD)."
+  },
+  "TVDSS": {
+    "canonical": "TVDSS",
+    "aliases": ["tvdss", "true vertical depth subsea", "tvdss_std", "tvdss cmp", "tvdss_cmp"],
+    "style": {"color": "#0000FF", "line_style": "solid", "scale": [null, null]},
+    "units": ["m"],
+    "description": "True Vertical Depth Subsea (TVDSS_STD)."
+  },
+  "Resistivity (Best)": {
+    "canonical": "Resistivity (Best)",
+    "aliases": ["res", "res_best", "res_std", "res_cmp", "best resistivity"],
+    "style": {"color": "#FF0000", "line_style": "solid", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Best (composite) resistivity per OMVP (RES_STD/RES_CMP)."
+  },
+  "GR (uR/h or CPS or RADT)": {
+    "canonical": "GR (uR/h or CPS or RADT)",
+    "aliases": ["gr_ur/h", "gr_cps", "gr_radt", "gr_ur/h_std", "gr_cps_std", "gr_radt_std", "gr_ur/h_cmp", "gr_cps_cmp", "gr_radt_cmp"],
+    "style": {"color": "#00BE00", "line_style": "dash", "scale": [0, 1000]},
+    "units": ["uR/h", "cps", "unitless"],
+    "description": "Vintage gamma (micro‑roentgen per hour / counts per second / radium equivalent)."
+  },
+  "Micro Resistivity (Inverse)": {
+    "canonical": "Micro Resistivity (Inverse)",
+    "aliases": ["minv", "micro inv", "minv_std", "minv_cmp"],
+    "style": {"color": "#A52A2A", "line_style": "solid", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Micro resistivity inverse (MINV)."
+  },
+  "Micro Resistivity (Normale)": {
+    "canonical": "Micro Resistivity (Normale)",
+    "aliases": ["mnor", "micro normale", "mnor_std", "mnor_cmp"],
+    "style": {"color": "#800080", "line_style": "dash", "scale": [0.2, 2000]},
+    "units": ["ohm.m", "ohmm"],
+    "description": "Micro resistivity normale (MNOR)."
+  },
+  "Neutron (API/CPS)": {
+    "canonical": "Neutron (API/CPS)",
+    "aliases": ["neu_api", "neu_cps", "neutron api", "neutron cps", "neu_api_std", "neu_cps_std", "neu_api_cmp", "neu_cps_cmp"],
+    "style": {"color": "#0000FF", "line_style": "long-dash", "scale": [0, 5000]},
+    "units": ["API", "cps"],
+    "description": "Vintage neutron (API or cps)."
+  }
+}

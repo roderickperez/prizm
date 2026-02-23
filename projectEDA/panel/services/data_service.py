@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,98 @@ import numpy as np
 import pandas as pd
 
 from projectEDA import ProjectEDA_constants as constants
-from projectEDA.utils import normalize_log_group, safe_date, safe_float, safe_text
+
+
+def safe_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+
+def safe_float(value: Any, default: float = math.nan) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def safe_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text = safe_text(value)
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            continue
+    try:
+        return pd.to_datetime(text, errors="coerce").date()
+    except Exception:
+        return None
+
+
+def _normalize_token(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in safe_text(value))
+    return " ".join(cleaned.split())
+
+
+def _load_mnemonics_master() -> tuple[dict[str, Any], dict[str, str]]:
+    path = Path(__file__).resolve().parents[2] / "mnemonics_master.json"
+    if not path.exists():
+        return {}, {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, {}
+
+    alias_to_group: dict[str, str] = {}
+    for group_name, payload in data.items():
+        alias_to_group[_normalize_token(group_name)] = group_name
+
+        if isinstance(payload, dict):
+            canonical = safe_text(payload.get("canonical"), "")
+            if canonical:
+                alias_to_group[_normalize_token(canonical)] = group_name
+            for alias in payload.get("aliases", []) or []:
+                token = _normalize_token(alias)
+                if token:
+                    alias_to_group[token] = group_name
+
+    return data, alias_to_group
+
+
+def normalize_log_group(log_name: str, alias_to_group: dict[str, str]) -> str:
+    token = _normalize_token(log_name)
+    if token in alias_to_group:
+        return alias_to_group[token]
+
+    compact = token.replace(" ", "")
+    for alias_token, group_name in alias_to_group.items():
+        if alias_token.replace(" ", "") == compact:
+            return group_name
+
+    upper = safe_text(log_name).upper()
+    if upper.startswith("GR"):
+        return "Gamma Ray"
+    if upper.startswith("RH") or "DENS" in upper:
+        return "Density"
+    if upper.startswith("DT"):
+        return "Sonic (DT)"
+    if "CALI" in upper or upper.startswith("CAL"):
+        return "Caliper"
+    if "RES" in upper or upper.startswith(("RD", "RM", "RS", "RXO", "RT")):
+        return "Resistivity (Best)"
+    return "Other"
 
 
 @dataclass
@@ -27,6 +118,7 @@ class ProjectEDADataService:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.mnemonics_master, self.alias_to_group = _load_mnemonics_master()
         self._init_db()
 
     def _conn(self):
@@ -64,6 +156,7 @@ class ProjectEDADataService:
                     well_name VARCHAR,
                     log_name VARCHAR,
                     log_group VARCHAR,
+                    mnemonic_group VARCHAR,
                     md DOUBLE,
                     value DOUBLE,
                     unit VARCHAR
@@ -90,6 +183,9 @@ class ProjectEDADataService:
                 )
                 """
             )
+            cols = con.execute("PRAGMA table_info('logs')").df()["name"].tolist()
+            if "mnemonic_group" not in cols:
+                con.execute("ALTER TABLE logs ADD COLUMN mnemonic_group VARCHAR")
 
     def _read_selections(self) -> dict[str, Any]:
         path = Path(str(constants.SELECTIONS_FILE))
@@ -192,13 +288,14 @@ class ProjectEDADataService:
                         idx = np.linspace(0, len(tmp) - 1, constants.MAX_POINTS_PER_LOG).astype(int)
                         tmp = tmp.iloc[idx]
 
-                    log_group = normalize_log_group(log_name)
+                    log_group = normalize_log_group(log_name, self.alias_to_group)
                     unit = safe_text(getattr(log, "unit", ""), "")
 
                     tmp["well_guid"] = well_guid
                     tmp["well_name"] = well_name
                     tmp["log_name"] = log_name
                     tmp["log_group"] = log_group
+                    tmp["mnemonic_group"] = log_group
                     tmp["unit"] = unit
                     tmp = tmp.rename(columns={"MD": "md", "Value": "value"})
                     log_rows.extend(tmp.to_dict(orient="records"))
@@ -274,7 +371,8 @@ class ProjectEDADataService:
                             "well_guid": w["well_guid"],
                             "well_name": w["well_name"],
                             "log_name": log_name,
-                            "log_group": normalize_log_group(log_name),
+                            "log_group": normalize_log_group(log_name, self.alias_to_group),
+                            "mnemonic_group": normalize_log_group(log_name, self.alias_to_group),
                             "md": float(m),
                             "value": float(v),
                             "unit": "",
@@ -326,10 +424,13 @@ class ProjectEDADataService:
                 INSERT INTO log_standardization
                 SELECT
                     log_name,
-                    log_group,
-                    ROW_NUMBER() OVER (PARTITION BY log_group ORDER BY COUNT(*) DESC, log_name) AS priority
+                    COALESCE(mnemonic_group, log_group),
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(mnemonic_group, log_group)
+                        ORDER BY COUNT(*) DESC, log_name
+                    ) AS priority
                 FROM logs
-                GROUP BY log_name, log_group
+                GROUP BY log_name, log_group, mnemonic_group
                 """
             )
 
@@ -376,13 +477,14 @@ class ProjectEDADataService:
                 SELECT
                     log_name,
                     log_group,
+                    COALESCE(mnemonic_group, log_group) AS mnemonic_group,
                     COUNT(DISTINCT well_name) AS wells,
                     COUNT(*) AS rows,
                     MIN(md) AS md_min,
                     MAX(md) AS md_max
                 FROM logs
-                GROUP BY log_name, log_group
-                ORDER BY log_group, log_name
+                GROUP BY log_name, log_group, mnemonic_group
+                ORDER BY mnemonic_group, log_name
                 """
             ).df()
 
@@ -395,6 +497,13 @@ class ProjectEDADataService:
                 ORDER BY log_group, priority, log_name
                 """
             ).df()
+
+    def get_mnemonic_groups(self) -> list[str]:
+        if self.mnemonics_master:
+            return sorted(self.mnemonics_master.keys())
+        with self._conn() as con:
+            df = con.execute("SELECT DISTINCT log_group FROM logs ORDER BY log_group").df()
+        return df["log_group"].dropna().astype(str).tolist() if not df.empty else []
 
     def save_log_standardization(self, df: pd.DataFrame) -> None:
         if df.empty:

@@ -9,9 +9,14 @@ def build_page(service) -> pn.Column:
         std_df = service.get_logs_catalog()[["log_name", "log_group"]].copy()
         std_df["priority"] = 1
 
+    group_options = service.get_mnemonic_groups()
+
     editor = pn.widgets.Tabulator(
         std_df,
-        editors={"log_group": "input", "priority": {"type": "number"}},
+        editors={
+            "log_group": {"type": "list", "values": group_options} if group_options else "input",
+            "priority": {"type": "number"},
+        },
         pagination="local",
         page_size=20,
         layout="fit_data_stretch",
@@ -25,8 +30,22 @@ def build_page(service) -> pn.Column:
         service.save_log_standardization(editor.value)
         message.object = "✅ Log grouping and priorities saved to DuckDB."
 
+    def _apply_master(_=None):
+        catalog = service.get_logs_catalog()
+        if catalog.empty:
+            message.object = "ℹ️ No logs available to map."
+            return
+        updated = catalog[["log_name", "mnemonic_group"]].rename(columns={"mnemonic_group": "log_group"}).copy()
+        updated["priority"] = (
+            updated.groupby("log_group").cumcount() + 1
+        )
+        editor.value = updated[["log_name", "log_group", "priority"]]
+        message.object = "✅ Groups refreshed from mnemonics master aliases."
+
     save_btn = pn.widgets.Button(name="Save Grouping and Priority", button_type="primary")
     save_btn.on_click(_save)
+    master_btn = pn.widgets.Button(name="Apply Mnemonics Master", button_type="default")
+    master_btn.on_click(_apply_master)
 
     summary = pn.bind(
         lambda df: pn.widgets.Tabulator(
@@ -44,9 +63,9 @@ def build_page(service) -> pn.Column:
     return pn.Column(
         pn.pane.Markdown("# Log Standardization"),
         pn.pane.Markdown(
-            "Current logs can be organized in groups and ordered by priority. Priority `1` is treated as the standard/first log in each group."
+            "Current logs can be organized in groups and ordered by priority. Priority `1` is treated as the standard/first log in each group. Group suggestions come from `mnemonics_master.json`."
         ),
-        pn.Row(save_btn, message),
+        pn.Row(master_btn, save_btn, message),
         editor,
         pn.pane.Markdown("## Current Grouped View"),
         summary,

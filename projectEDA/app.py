@@ -1,33 +1,25 @@
-# N:\_USER_GLOBAL\PETREL\Prizm\wf\EDA\app.py
+from __future__ import annotations
 
 from pathlib import Path
-
-import streamlit as st
-
-from utils import hide_native_sidebar_pages, build_streamlit_navigation
+import subprocess
+import sys
 
 
-
-st.set_page_config(
-    page_title="GeoPython | Well EDA",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-
-# Hide Streamlit's default pages list (belt & suspenders; also done inside utils)
-
-hide_native_sidebar_pages()
-
-
-
-# Register all pages from a single source of truth
-
-nav = build_streamlit_navigation(position="sidebar", expanded=False)
+def main() -> int:
+    root = Path(__file__).resolve().parent
+    entry = root / "panel" / "ProjectEDA_main.py"
+    cmd = [
+        sys.executable,
+        "-m",
+        "panel",
+        "serve",
+        str(entry),
+        "--autoreload",
+        "--port",
+        "5017",
+    ]
+    return subprocess.call(cmd)
 
 
-
-# Run selected page
-
-nav.run()
+if __name__ == "__main__":
+    raise SystemExit(main())
