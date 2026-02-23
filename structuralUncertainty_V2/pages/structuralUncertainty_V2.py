@@ -81,6 +81,7 @@ try:
     from shared.ui.omv_theme import (
         BLUE_OMV_COLOR,
         DARK_BLUE_OMV_COLOR,
+        DARK_MAGENTA_OMV_COLOR,
         NEON_OMV_COLOR,
         docs_button_html,
         get_content_text_color,
@@ -95,6 +96,7 @@ try:
 except ImportError:
     BLUE_OMV_COLOR = "#005A9B"
     DARK_BLUE_OMV_COLOR = "#003056"
+    DARK_MAGENTA_OMV_COLOR = "#4536a2"
     NEON_OMV_COLOR = "#00E5FF"
 
     def docs_button_html(_url: str) -> str:
@@ -331,6 +333,7 @@ wells_refresh_token = pn.widgets.IntInput(name="_wells_refresh_token", value=0, 
 stack_cache: dict[str, object] = {"key": None, "data": None}
 trap_cache: dict[str, object] = {"key": None, "data": None}
 hist_panel_cache: dict[str, object] = {"key": None, "panel": None}
+wells_applied_state: dict[str, object] = {"df": pd.DataFrame(columns=["Well Name", "X", "Y", "Velocity"])}
 MAX_VELOCITY_STD_FPS = 50.0
 
 
@@ -413,6 +416,11 @@ def _on_velocity_units_change(event) -> None:
         if "Velocity" in df.columns:
             df["Velocity"] = pd.to_numeric(df["Velocity"], errors="coerce") * old_to_mps / new_to_mps
             tbl_wells.value = df
+    applied_df = wells_applied_state.get("df")
+    if isinstance(applied_df, pd.DataFrame) and not applied_df.empty and "Velocity" in applied_df.columns:
+        df_applied = applied_df.copy()
+        df_applied["Velocity"] = pd.to_numeric(df_applied["Velocity"], errors="coerce") * old_to_mps / new_to_mps
+        wells_applied_state["df"] = _sanitize_wells_dataframe(df_applied)
     _refresh_unit_labels()
     _bump_wells_refresh()
     _trigger_refresh()
@@ -428,6 +436,14 @@ def _on_xy_units_change(event) -> None:
         if "Y" in df.columns:
             df["Y"] = pd.to_numeric(df["Y"], errors="coerce") * old_factor / new_factor
         tbl_wells.value = df
+    applied_df = wells_applied_state.get("df")
+    if isinstance(applied_df, pd.DataFrame) and not applied_df.empty:
+        df_applied = applied_df.copy()
+        if "X" in df_applied.columns:
+            df_applied["X"] = pd.to_numeric(df_applied["X"], errors="coerce") * old_factor / new_factor
+        if "Y" in df_applied.columns:
+            df_applied["Y"] = pd.to_numeric(df_applied["Y"], errors="coerce") * old_factor / new_factor
+        wells_applied_state["df"] = _sanitize_wells_dataframe(df_applied)
     _refresh_unit_labels()
     _bump_wells_refresh()
     _trigger_refresh()
@@ -517,11 +533,11 @@ def _time_unit_label() -> str:
     return "ms" if rg_time_units.value == "milliseconds" else "s"
 
 
-def _wells_dataframe_clean() -> pd.DataFrame:
-    if "tbl_wells" not in globals() or not isinstance(tbl_wells.value, pd.DataFrame) or tbl_wells.value.empty:
+def _sanitize_wells_dataframe(df_input: pd.DataFrame | None) -> pd.DataFrame:
+    if df_input is None or not isinstance(df_input, pd.DataFrame) or df_input.empty:
         return pd.DataFrame(columns=["Well Name", "X", "Y", "Velocity"])
 
-    df = tbl_wells.value.copy()
+    df = df_input.copy()
     if "Well Name" not in df.columns:
         df.insert(0, "Well Name", [f"Well_{i+1}" for i in range(len(df))])
 
@@ -536,6 +552,16 @@ def _wells_dataframe_clean() -> pd.DataFrame:
         df["Well Name"] = [name if name else generated[i] for i, name in enumerate(df["Well Name"].tolist())]
 
     return df[["Well Name", "X", "Y", "Velocity"]]
+
+
+def _pending_wells_dataframe_clean() -> pd.DataFrame:
+    if "tbl_wells" not in globals() or not isinstance(tbl_wells.value, pd.DataFrame):
+        return pd.DataFrame(columns=["Well Name", "X", "Y", "Velocity"])
+    return _sanitize_wells_dataframe(tbl_wells.value)
+
+
+def _wells_dataframe_clean() -> pd.DataFrame:
+    return _sanitize_wells_dataframe(wells_applied_state.get("df"))
 
 
 def _well_arrays_internal() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1041,13 +1067,16 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     for row in section_stack:
         ax_section.plot(section_x, row, color="red", alpha=0.2, linewidth=0.7)
     ax_section.plot(section_x, final_section, color="black", linewidth=2.2, label=f"Final Depth [{_depth_unit_label()}] from Mean AV")
+    section_std = np.nanstd(section_stack, axis=0)
+    ax_section.plot(section_x, final_section + section_std, color="black", linestyle="--", linewidth=1.4, alpha=0.9, label="Std +1σ (dashed black)")
+    ax_section.plot(section_x, final_section - section_std, color="black", linestyle="--", linewidth=1.4, alpha=0.9, label="Std -1σ (dashed black)")
     deterministic_spill, _, _ = core_get_trap_and_spill(final_depth_map, _depth_step_m())
     ax_section.axhline(
         deterministic_spill,
         color="blue",
         linestyle="--",
         linewidth=1.6,
-        label=f"Spill depth: {float(_depth_from_m([deterministic_spill])[0]):.2f} {_depth_unit_label()}",
+        label=f"Spill depth (dashed blue): {float(_depth_from_m([deterministic_spill])[0]):.2f} {_depth_unit_label()}",
     )
     if well_x_m.size > 0:
         center_x = float(np.mean(x_coords))
@@ -1055,17 +1084,17 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         x_span = float(np.max(x_coords) - np.min(x_coords))
         y_span = float(np.max(y_coords) - np.min(y_coords))
         half_len = 0.5 * np.sqrt(x_span**2 + y_span**2)
-        phi = np.deg2rad((sld_section_angle.value + 90.0) % 360.0)
-        d_x = np.cos(phi)
-        d_y = np.sin(phi)
-        t_vals = (well_x_m - center_x) * d_x + (well_y_m - center_y) * d_y
+        phi = np.deg2rad((_applied_section_angle() + 90.0) % 360.0)
+        t_vals = (well_x_m - center_x) * np.cos(phi) + (well_y_m - center_y) * np.sin(phi)
         t_vals = np.clip(t_vals, -half_len, half_len)
         well_dist = t_vals + half_len
         well_depth = np.interp(well_dist, section_x, final_section)
-        ax_section.scatter(well_dist, well_depth, c="yellow", edgecolors="black", s=40, zorder=9)
+        ax_section.scatter(well_dist, well_depth, c=DARK_MAGENTA_OMV_COLOR, edgecolors=DARK_MAGENTA_OMV_COLOR, s=40, zorder=9)
+        for wx in well_dist:
+            ax_section.axvline(float(wx), color=DARK_MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, alpha=0.9)
         for idx, (wd, wz) in enumerate(zip(well_dist, well_depth)):
             label = well_names[idx] if idx < len(well_names) else f"Well_{idx+1}"
-            ax_section.annotate(label, (wd, wz), xytext=(6, 6), textcoords="offset points", color="gold", fontsize=8, fontweight="bold")
+            ax_section.annotate(label, (wd, wz), xytext=(0, 9), textcoords="offset points", color=DARK_MAGENTA_OMV_COLOR, fontsize=8, fontweight="bold", ha="center")
     # Dynamically set Y-axis range for section based on section data
     section_min = float(np.nanmin(section_stack))
     section_max = float(np.nanmax(section_stack))
@@ -1079,6 +1108,8 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     ax_section.set_xlabel("Section Samples")
     ax_section.set_ylabel("Depth (m)")
     ax_section.yaxis.labelpad = 2
+    if well_x_m.size > 0:
+        ax_section.plot([], [], color=DARK_MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, label="Well location (dashed magenta)")
     ax_section.legend(loc="upper right", fontsize=8)
     ax_section.grid(alpha=0.25)
 
@@ -1343,7 +1374,8 @@ def _default_well_values() -> tuple[str, float, float, float]:
     y_mid = float(_xy_from_m([(y_min + y_max) / 2.0])[0])
     v_mid = float(_velocity_from_mps([np.nanmean(np.asarray(surface_state["velocity"].values, dtype=float))])[0])
     v_mid = round(v_mid, 1)
-    next_name = f"Well_{len(_wells_dataframe_clean()) + 1}"
+    pending_df = _pending_wells_dataframe_clean()
+    next_name = f"Well_{len(pending_df) + 1}"
     return next_name, x_mid, y_mid, v_mid
 
 
@@ -1352,9 +1384,6 @@ def _add_well_row(_event=None) -> None:
     df = tbl_wells.value.copy()
     df.loc[len(df)] = {"Well Name": well_name, "X": x_mid, "Y": y_mid, "Velocity": v_mid}
     tbl_wells.value = df
-    _invalidate_caches()
-    _bump_wells_refresh()
-    _trigger_refresh()
 
 
 def _remove_selected_well_row(_event=None) -> None:
@@ -1368,12 +1397,10 @@ def _remove_selected_well_row(_event=None) -> None:
     else:
         df = df.iloc[:-1].reset_index(drop=True)
     tbl_wells.value = df
-    _invalidate_caches()
-    _bump_wells_refresh()
-    _trigger_refresh()
 
 
 def _on_update_well_location(_event) -> None:
+    wells_applied_state["df"] = _pending_wells_dataframe_clean().copy()
     _invalidate_caches()
     _bump_wells_refresh()
     _set_progress(0)
@@ -1383,7 +1410,6 @@ def _on_update_well_location(_event) -> None:
 btn_add_well.on_click(_add_well_row)
 btn_remove_well.on_click(_remove_selected_well_row)
 btn_update_well_location.on_click(_on_update_well_location)
-tbl_wells.param.watch(lambda _event: (_invalidate_caches(), _bump_wells_refresh(), _trigger_refresh()), "value")
 
 sld_c_inc = pn.widgets.FloatSlider(
     name="Contour Search Step (ft)",
@@ -1669,8 +1695,9 @@ txt_export_petrel_surface_name = pn.widgets.TextInput(
     value="StructuralUncertainty",
     sizing_mode="stretch_width",
 )
-chk_export_average_mean = pn.widgets.Checkbox(name="Average Mean", value=True)
+chk_export_average_mean = pn.widgets.Checkbox(name="Average Velocity Map", value=True)
 chk_export_final_depth = pn.widgets.Checkbox(name="Final Depth", value=True)
+chk_export_final_depth_contour = pn.widgets.Checkbox(name="Final Depth Contour Map", value=True)
 chk_export_isoprobability = pn.widgets.Checkbox(name="Isoprobability", value=True)
 chk_export_all_realizations = pn.widgets.Checkbox(name="All realization maps (N)", value=False)
 btn_export_petrel_surface = pn.widgets.Button(
@@ -1787,6 +1814,13 @@ def plot_top_right_section(*_args):
     ).opts(color="black", line_dash="dashed", line_width=1.5, alpha=0.9)
 
     selected_idx = min(max(sld_map_show.value - 1, 0), section_stack.shape[0] - 1)
+    n_maps = int(section_stack.shape[0])
+    max_display_curves = 120
+    stride = max(1, int(np.ceil(n_maps / max_display_curves)))
+    display_indices = list(range(0, n_maps, stride))
+    if selected_idx not in display_indices:
+        display_indices.append(selected_idx)
+    display_indices = sorted(set(display_indices))
     realization_curves = [
         hv.Curve((x_coords, section_stack[i]), label="Stochastic Depth Realizations").opts(
             color="red",
@@ -1794,7 +1828,7 @@ def plot_top_right_section(*_args):
             alpha=0.25,
             show_legend=False,
         )
-        for i in range(section_stack.shape[0])
+        for i in display_indices
         if i != selected_idx
     ]
     selected_curve = hv.Curve(
@@ -1842,9 +1876,12 @@ def plot_top_right_section(*_args):
     section_overlay = hv.Overlay(realization_curves + [selected_curve]) * base_curve * spill_line * crest_point * spill_text * crest_point_text
 
     if chk_show_wells.value:
-        wx_m, wy_m, _ = _well_arrays_internal()
-        well_names = [str(w) for w in _well_names_internal().tolist()]
-        if wx_m.size > 0:
+        wells_df_clean = _wells_dataframe_clean()
+        if not wells_df_clean.empty:
+            x_factor = 1.0 if rg_xy_units.value == "meters" else 3.280839895013123
+            wx_m = wells_df_clean["X"].to_numpy(dtype=float) / x_factor
+            wy_m = wells_df_clean["Y"].to_numpy(dtype=float) / x_factor
+            well_names = wells_df_clean["Well Name"].astype(str).tolist()
             center_x = float(np.mean(np.asarray(base_twt.x.values, dtype=float)))
             center_y = float(np.mean(np.asarray(base_twt.y.values, dtype=float)))
             x_span = float(np.max(base_twt.x.values) - np.min(base_twt.x.values))
@@ -1865,19 +1902,28 @@ def plot_top_right_section(*_args):
             )
             section_hover = HoverTool(tooltips=[("Well", "@well_name"), ("Distance", "@Distance{0,0.00}"), ("Depth", "@Depth{0,0.00}")])
             section_overlay = section_overlay * hv.Points(section_wells, kdims=["Distance", "Depth"], vdims=["well_name"]).opts(
-                color="yellow",
+                color=DARK_MAGENTA_OMV_COLOR,
                 size=8,
                 marker="circle",
-                line_color="black",
+                line_color=DARK_MAGENTA_OMV_COLOR,
                 tools=[section_hover],
             )
             section_overlay = section_overlay * hv.Labels(section_wells, kdims=["Distance", "Depth"], vdims=["well_name"]).opts(
                 text_font_size="8pt",
-                text_color="black",
+                text_color=DARK_MAGENTA_OMV_COLOR,
                 text_align="center",
                 xoffset=0,
                 yoffset=10,
             )
+
+            for idx, well_x in enumerate(distance_vals):
+                line_label = "Well location (dashed magenta)" if idx == 0 else ""
+                section_overlay = section_overlay * hv.VLine(float(well_x), label=line_label).opts(
+                    color=DARK_MAGENTA_OMV_COLOR,
+                    line_dash="dashed",
+                    line_width=1.6,
+                    alpha=0.9,
+                )
 
     section_overlay = section_overlay * upper_std_curve * lower_std_curve
     return section_overlay.opts(
@@ -1895,7 +1941,7 @@ def plot_top_right_section(*_args):
 @pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, refresh_token, wells_refresh_token, chk_show_wells, rg_velocity_units, rg_depth_units, rg_xy_units)
 def plot_bottom_left_final_depth_from_av(*_args):
     global av_depth_tabs
-    logger.debug("Rendering average AV map and final depth map")
+    logger.debug("Rendering average velocity map and final depth map")
 
     angle_deg = _applied_section_angle()
     _, _, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
@@ -2012,6 +2058,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
                 levels = np.arange(vmin, vmax, step_val)
                 if len(levels) > 0:
                     white_contours = depth_da.hvplot.contour(levels=list(levels), color="black", line_width=1, alpha=0.8)
+                    av_overlay = av_overlay * white_contours
                     overlay = overlay * white_contours
         except Exception:
             logger.warning("Final depth white contour rendering skipped")
@@ -2041,7 +2088,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
 
     if av_depth_tabs is None:
         av_depth_tabs = pn.Tabs(
-            ("Average AV", average_panel),
+            ("Average Velocity Map", average_panel),
             ("Final Depth", final_panel),
             dynamic=False,
             tabs_location="above",
@@ -2049,7 +2096,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
         )
     else:
         current_active = av_depth_tabs.active
-        av_depth_tabs[:] = [("Average AV", average_panel), ("Final Depth", final_panel)]
+        av_depth_tabs[:] = [("Average Velocity Map", average_panel), ("Final Depth", final_panel)]
         av_depth_tabs.active = min(current_active, 1)
 
     return av_depth_tabs
@@ -2587,9 +2634,14 @@ def _export_surface_to_petrel(_event) -> None:
         selected_surfaces: list[tuple[str, np.ndarray]] = []
 
         if chk_export_average_mean.value:
-            selected_surfaces.append((f"{prefix}_AverageMean", np.asarray(avg_velocity_map, dtype=float).T))
+            selected_surfaces.append((f"{prefix}_AverageVelocityMap", np.asarray(avg_velocity_map, dtype=float).T))
         if chk_export_final_depth.value:
             selected_surfaces.append((f"{prefix}_FinalDepth", np.asarray(final_depth_map, dtype=float).T))
+        if chk_export_final_depth_contour.value:
+            contour_step_m = max(float(sld_depth_contours.value) * _depth_unit_to_m(), 0.1)
+            contour_map = np.asarray(final_depth_map, dtype=float)
+            contour_map = np.where(np.isfinite(contour_map), np.round(contour_map / contour_step_m) * contour_step_m, np.nan)
+            selected_surfaces.append((f"{prefix}_FinalDepthContour", contour_map.T))
         if chk_export_isoprobability.value:
             selected_surfaces.append((f"{prefix}_Isoprobability", np.asarray(prob_array, dtype=float).T))
         if chk_export_all_realizations.value:
@@ -2716,7 +2768,7 @@ def wrap_plot(title: str, plot_func, area_name: str) -> pn.Column:
 main_grid = pn.Column(
     wrap_plot("Input Time Surface (TWT)", plot_top_left_input_twt_map, "map"),
     wrap_plot("Structural Section (Depth Realizations)", plot_top_right_section, "section"),
-    wrap_plot("AV Mean and Final Depth", plot_bottom_left_final_depth_from_av, "realization"),
+    wrap_plot("Average Velocity Map and Final Depth", plot_bottom_left_final_depth_from_av, "realization"),
     wrap_plot("Isoprobability Map", plot_bottom_right_isoprobability, "iso"),
     wrap_plot("Monte Carlo Distributions", plot_third_column_volumetrics, "hists"),
     css_classes=["dashboard-grid"],
@@ -2810,6 +2862,7 @@ card_7 = create_sidebar_card(
     txt_export_petrel_surface_name,
     chk_export_average_mean,
     chk_export_final_depth,
+    chk_export_final_depth_contour,
     chk_export_isoprobability,
     chk_export_all_realizations,
     btn_export_petrel_surface,
