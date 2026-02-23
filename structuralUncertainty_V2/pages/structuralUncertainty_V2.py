@@ -301,6 +301,10 @@ radio_group_stylesheets = get_radio_button_stylesheets()
 # ==============================================================================
 x_values = np.linspace(0, 10000, 100)
 y_values = np.linspace(0, 10000, 100)
+_map_diag_m = float(np.hypot(float(np.max(x_values) - np.min(x_values)), float(np.max(y_values) - np.min(y_values))))
+DEFAULT_RANGE_M = float(np.clip(0.25 * _map_diag_m, 500.0, 5000.0))
+DEFAULT_SILL = 1.0
+DEFAULT_NUGGET = 0.1
 
 
 def _parse_imported_surface() -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -1664,21 +1668,21 @@ sld_range = pn.widgets.FloatSlider(
     name="Range (m)",
     start=500,
     end=5000,
-    value=1500,
+    value=DEFAULT_RANGE_M,
     stylesheets=slider_stylesheets,
 )
 sld_sill = pn.widgets.FloatSlider(
     name="Sill (Variance)",
     start=0.1,
     end=2.0,
-    value=1.0,
+    value=DEFAULT_SILL,
     stylesheets=slider_stylesheets,
 )
 sld_nugget = pn.widgets.FloatSlider(
     name="Nugget",
     start=0.0,
     end=0.5,
-    value=0.1,
+    value=DEFAULT_NUGGET,
     stylesheets=slider_stylesheets,
 )
 sld_slope = pn.widgets.Select(

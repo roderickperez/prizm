@@ -163,7 +163,7 @@ From mean AV map:
 
 Default V2 variogram starting point:
 
-- Range = 1500 m
+- Range = 25% of map diagonal (clipped to 500–5000 m)
 - Sill = 1.0
 - Nugget = 0.1
 
