@@ -74,8 +74,12 @@ from core.engine_V2 import (  # noqa: E402
     get_trap_and_spill as core_get_trap_and_spill,
     line_through_center as core_line_through_center,
 )
-from core.pdf_report_tables import build_pdf_tables_pages as core_build_pdf_tables_pages  # noqa: E402
-from petrel_surface_parser import parse_petrel_surface_file  # noqa: E402
+from core.pdf_report_tables_V2 import build_pdf_tables_pages as core_build_pdf_tables_pages  # noqa: E402
+from core.qc_analysis_V2 import (  # noqa: E402
+    build_geostat_qc_bundle as core_build_geostat_qc_bundle,
+    build_pdf_geostat_qc_pages as core_build_pdf_geostat_qc_pages,
+)
+from structuralUncertainty_V2.petrel_surface_parser_V2 import parse_petrel_surface_file  # noqa: E402
 
 try:
     from shared.ui.omv_theme import (
@@ -408,6 +412,16 @@ def _trigger_refresh() -> None:
     refresh_token.value = int(refresh_token.value) + 1
 
 
+def _mark_general_settings_pending() -> None:
+    pn.state.notifications.info("General settings changed. Press 'Apply General Settings' to update plots.", duration=2800)
+
+
+def _apply_general_settings(_event=None) -> None:
+    _invalidate_caches()
+    _bump_wells_refresh()
+    _trigger_refresh()
+
+
 def _on_velocity_units_change(event) -> None:
     old_to_mps = 1.0 if event.old == "m/s" else 0.3048
     new_to_mps = 1.0 if event.new == "m/s" else 0.3048
@@ -424,8 +438,7 @@ def _on_velocity_units_change(event) -> None:
         df_applied["Velocity"] = pd.to_numeric(df_applied["Velocity"], errors="coerce") * old_to_mps / new_to_mps
         wells_applied_state["df"] = _sanitize_wells_dataframe(df_applied)
     _refresh_unit_labels()
-    _bump_wells_refresh()
-    _trigger_refresh()
+    _mark_general_settings_pending()
 
 
 def _on_xy_units_change(event) -> None:
@@ -447,8 +460,7 @@ def _on_xy_units_change(event) -> None:
             df_applied["Y"] = pd.to_numeric(df_applied["Y"], errors="coerce") * old_factor / new_factor
         wells_applied_state["df"] = _sanitize_wells_dataframe(df_applied)
     _refresh_unit_labels()
-    _bump_wells_refresh()
-    _trigger_refresh()
+    _mark_general_settings_pending()
 
 
 def _on_depth_units_change(event) -> None:
@@ -462,12 +474,12 @@ def _on_depth_units_change(event) -> None:
 
     _sync_section_y_range()
     _refresh_unit_labels()
-    _trigger_refresh()
+    _mark_general_settings_pending()
 
 
 def _on_generic_units_change(_event) -> None:
     _refresh_unit_labels()
-    _trigger_refresh()
+    _mark_general_settings_pending()
 
 
 def _on_depth_contour_toggle(event) -> None:
@@ -486,6 +498,31 @@ def _surface_xy_bounds() -> tuple[float, float, float, float, np.ndarray, np.nda
 
 def _applied_section_angle() -> float:
     return float(surface_state.get("section_angle_applied", 0.0))
+
+
+def _project_wells_to_section_distance_m(
+    well_x_m: np.ndarray,
+    well_y_m: np.ndarray,
+    x_values_m: np.ndarray,
+    y_values_m: np.ndarray,
+    angle_deg: float,
+    section_distance_m: np.ndarray,
+) -> np.ndarray:
+    if well_x_m.size == 0 or section_distance_m.size == 0:
+        return np.array([], dtype=float)
+
+    center_x = float(np.mean(x_values_m))
+    center_y = float(np.mean(y_values_m))
+    x_span = float(np.max(x_values_m) - np.min(x_values_m))
+    y_span = float(np.max(y_values_m) - np.min(y_values_m))
+    half_len = 0.5 * np.sqrt(x_span**2 + y_span**2)
+    phi = np.deg2rad((angle_deg + 90.0) % 360.0)
+    if half_len <= 0.0:
+        return np.full(well_x_m.size, float(section_distance_m[0]), dtype=float)
+
+    t_vals = (well_x_m - center_x) * np.cos(phi) + (well_y_m - center_y) * np.sin(phi)
+    t_samples = np.linspace(-half_len, half_len, int(section_distance_m.size))
+    return np.interp(t_vals, t_samples, np.asarray(section_distance_m, dtype=float))
 
 
 def _velocity_unit_to_mps() -> float:
@@ -580,6 +617,23 @@ def _well_arrays_internal() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return x_vals / x_factor, y_vals / x_factor, vel_vals * vel_factor
 
 
+def _well_section_anchor_xy_m() -> tuple[np.ndarray, np.ndarray]:
+    well_x_m, well_y_m, _ = _well_arrays_internal()
+    if well_x_m.size == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    if not bool(chk_use_wells.value):
+        return well_x_m, well_y_m
+
+    x_coords = np.asarray(surface_state.get("x_coords", surface_state["twt"].x.values), dtype=float)
+    y_coords = np.asarray(surface_state.get("y_coords", surface_state["twt"].y.values), dtype=float)
+
+    nearest_idx_x = np.array([int(np.argmin(np.abs(x_coords - wx))) for wx in well_x_m], dtype=int)
+    nearest_idx_y = np.array([int(np.argmin(np.abs(y_coords - wy))) for wy in well_y_m], dtype=int)
+
+    return x_coords[nearest_idx_x], y_coords[nearest_idx_y]
+
+
 def _well_names_internal() -> np.ndarray:
     df = _wells_dataframe_clean()
     if df.empty:
@@ -651,6 +705,35 @@ def _volumetric_series(trap_stats: dict[str, np.ndarray]) -> tuple[np.ndarray, n
         / 1e6
     )
     return arr_thick, arr_area, arr_grv, arr_stooip
+
+
+def _build_geostat_qc_bundle_payload(
+    velocity_stack: np.ndarray,
+    depth_stack: np.ndarray,
+    avg_velocity_map: np.ndarray,
+    final_depth_map: np.ndarray,
+    trap_stats: dict[str, np.ndarray],
+) -> dict[str, pd.DataFrame]:
+    twt_da = surface_state["twt"]
+    vel_da = surface_state["velocity"]
+    x_coords = np.asarray(surface_state.get("x_coords", twt_da.x.values), dtype=float)
+    y_coords = np.asarray(surface_state.get("y_coords", twt_da.y.values), dtype=float)
+
+    return core_build_geostat_qc_bundle(
+        twt_ms=np.asarray(twt_da.values, dtype=float),
+        base_velocity=np.asarray(vel_da.values, dtype=float),
+        velocity_stack=np.asarray(velocity_stack, dtype=float),
+        depth_stack=np.asarray(depth_stack, dtype=float),
+        final_depth_map=np.asarray(final_depth_map, dtype=float),
+        trap_masks=np.asarray(trap_stats["trap_masks"], dtype=bool),
+        x_coords=x_coords,
+        y_coords=y_coords,
+        wells_cov_df=_wells_covariance_dataframe(),
+        model=str(sld_slope.value),
+        range_val=float(sld_range.value),
+        sill=float(sld_sill.value),
+        nugget=float(sld_nugget.value),
+    )
 
 
 def _recommend_velocity_std_from_surface() -> dict[str, float]:
@@ -855,6 +938,8 @@ def _apply_surface_generation(_event=None) -> None:
     )
 
     _run_test_mode_diagnostics("surface_generate")
+    _surface_mode_hint.object = ""
+    _surface_mode_hint.visible = False
 
 
 def _on_surface_mode_change(event) -> None:
@@ -869,7 +954,8 @@ def _on_surface_mode_change(event) -> None:
         sld_vel_amp,
     ]:
         widget.visible = is_elongated
-    _apply_surface_generation()
+    _surface_mode_hint.object = "⚠️ Surface selection changed. Press **Generate / Update TWT Input** to load it."
+    _surface_mode_hint.visible = True
 
 
 def _on_depth_update_click(_event) -> None:
@@ -1081,15 +1167,15 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         label=f"Spill depth (dashed blue): {float(_depth_from_m([deterministic_spill])[0]):.2f} {_depth_unit_label()}",
     )
     if well_x_m.size > 0:
-        center_x = float(np.mean(x_coords))
-        center_y = float(np.mean(y_coords))
-        x_span = float(np.max(x_coords) - np.min(x_coords))
-        y_span = float(np.max(y_coords) - np.min(y_coords))
-        half_len = 0.5 * np.sqrt(x_span**2 + y_span**2)
-        phi = np.deg2rad((_applied_section_angle() + 90.0) % 360.0)
-        t_vals = (well_x_m - center_x) * np.cos(phi) + (well_y_m - center_y) * np.sin(phi)
-        t_vals = np.clip(t_vals, -half_len, half_len)
-        well_dist = t_vals + half_len
+        well_anchor_x_m, well_anchor_y_m = _well_section_anchor_xy_m()
+        well_dist = _project_wells_to_section_distance_m(
+            well_x_m=well_anchor_x_m,
+            well_y_m=well_anchor_y_m,
+            x_values_m=np.asarray(x_coords, dtype=float),
+            y_values_m=np.asarray(y_coords, dtype=float),
+            angle_deg=_applied_section_angle(),
+            section_distance_m=np.asarray(section_x, dtype=float),
+        )
         well_depth = np.interp(well_dist, section_x, final_section)
         ax_section.scatter(well_dist, well_depth, c=MAGENTA_OMV_COLOR, edgecolors="black", s=40, zorder=9)
         for wx in well_dist:
@@ -1136,7 +1222,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         if depth_max > depth_min:
             levels = np.arange(depth_min, depth_max, contour_interval_m)
             if len(levels) > 0:
-                ax_depth.contour(x_coords, y_coords, final_depth_map, levels=levels, colors="black", linewidths=0.6, alpha=0.75)
+                ax_depth.contour(x_coords, y_coords, final_depth_map, levels=levels, colors="white", linewidths=0.6, alpha=0.75)
 
     try:
         ax_depth.contour(x_coords, y_coords, final_depth_map, levels=[deterministic_spill], colors="red", linestyles="--", linewidths=1.8)
@@ -1546,6 +1632,12 @@ rg_volume_units = pn.widgets.RadioButtonGroup(
     stylesheets=radio_group_stylesheets,
     width=160,
 )
+btn_apply_general_settings = pn.widgets.Button(
+    name="Apply General Settings",
+    css_classes=["omv-run-btn"],
+    stylesheets=get_neon_button_stylesheets(),
+    sizing_mode="stretch_width",
+)
 
 
 def _general_setting_row(label: str, widget) -> pn.Row:
@@ -1586,7 +1678,7 @@ sld_nugget = pn.widgets.FloatSlider(
     name="Nugget",
     start=0.0,
     end=0.5,
-    value=0.0,
+    value=0.1,
     stylesheets=slider_stylesheets,
 )
 sld_slope = pn.widgets.Select(
@@ -1670,8 +1762,15 @@ btn_update_depth_maps.on_click(_on_depth_update_click)
 btn_update_vario.on_click(_on_depth_update_click)
 btn_update_culm.on_click(_on_depth_update_click)
 btn_update_volumetrics.on_click(_on_depth_update_click)
-chk_show_wells.param.watch(lambda _event: _trigger_refresh(), "value")
-chk_use_wells.param.watch(lambda _event: (_invalidate_caches(), _bump_wells_refresh(), _trigger_refresh()), "value")
+btn_apply_general_settings.on_click(_apply_general_settings)
+chk_show_wells.param.watch(
+    lambda _event: pn.state.notifications.info("Press 'Update Well Location' to apply well visibility changes.", duration=2800),
+    "value",
+)
+chk_use_wells.param.watch(
+    lambda _event: pn.state.notifications.info("Press 'Update Well Location' to apply well-anchor conditioning changes.", duration=2800),
+    "value",
+)
 
 txt_report_header = pn.widgets.TextInput(name="Plot Header", value="Structural Uncertainty Evaluation")
 txt_report_filename = pn.widgets.TextInput(name="File Name", value="structural_uncertainty_report")
@@ -1683,7 +1782,14 @@ btn_export_report = pn.widgets.Button(
     stylesheets=get_neon_button_stylesheets(),
     sizing_mode="stretch_width",
 )
+btn_export_qc_excel = pn.widgets.Button(
+    name="Export QC Excel",
+    css_classes=["omv-run-btn"],
+    stylesheets=get_neon_button_stylesheets(),
+    sizing_mode="stretch_width",
+)
 report_status = pn.pane.Markdown("", visible=False)
+qc_export_status = pn.pane.Markdown("", visible=False)
 report_export_progress = pn.widgets.Progress(
     name="Export Progress",
     value=0,
@@ -1879,21 +1985,17 @@ def plot_top_right_section(*_args):
     section_overlay = hv.Overlay(realization_curves + [selected_curve]) * base_curve * spill_line * crest_point * spill_text * crest_point_text
 
     if chk_show_wells.value:
-        wells_df_clean = _wells_dataframe_clean()
-        if not wells_df_clean.empty:
-            x_factor = 1.0 if rg_xy_units.value == "meters" else 3.280839895013123
-            wx_m = wells_df_clean["X"].to_numpy(dtype=float) / x_factor
-            wy_m = wells_df_clean["Y"].to_numpy(dtype=float) / x_factor
-            well_names = wells_df_clean["Well Name"].astype(str).tolist()
-            center_x = float(np.mean(np.asarray(base_twt.x.values, dtype=float)))
-            center_y = float(np.mean(np.asarray(base_twt.y.values, dtype=float)))
-            x_span = float(np.max(base_twt.x.values) - np.min(base_twt.x.values))
-            y_span = float(np.max(base_twt.y.values) - np.min(base_twt.y.values))
-            half_len = 0.5 * np.sqrt(x_span**2 + y_span**2)
-            phi = np.deg2rad((angle_deg + 90.0) % 360.0)
-            t_vals = (wx_m - center_x) * np.cos(phi) + (wy_m - center_y) * np.sin(phi)
-            t_vals = np.clip(t_vals, -half_len, half_len)
-            distance_m = t_vals + half_len
+        wx_m, wy_m = _well_section_anchor_xy_m()
+        well_names = [str(name) for name in _well_names_internal().tolist()]
+        if wx_m.size > 0:
+            distance_m = _project_wells_to_section_distance_m(
+                well_x_m=np.asarray(wx_m, dtype=float),
+                well_y_m=np.asarray(wy_m, dtype=float),
+                x_values_m=np.asarray(base_twt.x.values, dtype=float),
+                y_values_m=np.asarray(base_twt.y.values, dtype=float),
+                angle_deg=angle_deg,
+                section_distance_m=np.asarray(x_coords_m, dtype=float),
+            )
             distance_vals = _xy_from_m(distance_m)
             section_depth_vals = np.interp(distance_vals, x_coords, final_section)
             section_wells = pd.DataFrame(
@@ -2061,7 +2163,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
             if vmax > vmin:
                 levels = np.arange(vmin, vmax, step_val)
                 if len(levels) > 0:
-                    white_contours = depth_da.hvplot.contour(levels=list(levels), color="black", line_width=1, alpha=0.8)
+                    white_contours = depth_da.hvplot.contour(levels=list(levels), color="white", line_width=1, alpha=0.8)
                     av_overlay = av_overlay * white_contours
                     overlay = overlay * white_contours
         except Exception:
@@ -2290,6 +2392,15 @@ def _export_report(_event) -> None:
 
         report_export_progress.value = 20
         payload = _build_report_payload()
+        velocity_stack, depth_stack_qc, avg_velocity_map_qc, final_depth_map_qc = get_velocity_and_depth_stacks()
+        trap_stats_qc = get_trap_stats(depth_stack_qc)
+        qc_bundle = _build_geostat_qc_bundle_payload(
+            velocity_stack=velocity_stack,
+            depth_stack=depth_stack_qc,
+            avg_velocity_map=avg_velocity_map_qc,
+            final_depth_map=final_depth_map_qc,
+            trap_stats=trap_stats_qc,
+        )
         report_export_progress.value = 40
 
         if extension in {".png", ".jpeg"}:
@@ -2319,9 +2430,22 @@ def _export_report(_event) -> None:
                 fig_params = _build_pdf_parameters_page(header)
                 pdf.savefig(fig_params, bbox_inches="tight")
                 plt.close(fig_params)
-                report_export_progress.value = 100
+                for fig_qc in core_build_pdf_geostat_qc_pages(
+                    report_title=header,
+                    logo_path=REPORT_TABLE_LOGO_PATH,
+                    wells_cov_df=_wells_covariance_dataframe(),
+                    qc_bundle=qc_bundle,
+                ):
+                    pdf.savefig(fig_qc, bbox_inches="tight")
+                    plt.close(fig_qc)
+                report_export_progress.value = 95
 
-            pn.state.notifications.success(f"✅ Report exported: {output_path}", duration=3500)
+        qc_excel_path = out_dir / f"{base_name}_QC.xlsx"
+        _export_qc_excel_workbook(qc_excel_path, payload, qc_bundle=qc_bundle)
+        report_export_progress.value = 100
+        pn.state.notifications.success(f"✅ Report exported: {output_path}", duration=3500)
+        qc_export_status.object = f"✅ QC Excel exported: {qc_excel_path}"
+        qc_export_status.visible = True
         logger.info("Report exported: %s", output_path)
     except Exception as exc:
         pn.state.notifications.error(f"❌ Export failed: {exc}", duration=6000)
@@ -2335,7 +2459,44 @@ def _export_report(_event) -> None:
 btn_export_report.on_click(_export_report)
 
 
-def _export_qc_excel_workbook(output_path: Path, payload: dict[str, np.ndarray | pd.DataFrame | float]) -> None:
+def _export_qc_excel(_event) -> None:
+    header = txt_report_header.value.strip() or "Structural Uncertainty Evaluation"
+    base_name = txt_report_filename.value.strip() or "structural_uncertainty_report"
+    out_dir = Path(txt_report_location.value.strip() or str(APP_DIR / "reports"))
+
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = _build_report_payload()
+        velocity_stack, depth_stack_qc, avg_velocity_map_qc, final_depth_map_qc = get_velocity_and_depth_stacks()
+        trap_stats_qc = get_trap_stats(depth_stack_qc)
+        qc_bundle = _build_geostat_qc_bundle_payload(
+            velocity_stack=velocity_stack,
+            depth_stack=depth_stack_qc,
+            avg_velocity_map=avg_velocity_map_qc,
+            final_depth_map=final_depth_map_qc,
+            trap_stats=trap_stats_qc,
+        )
+
+        qc_path = out_dir / f"{base_name}_QC.xlsx"
+        _export_qc_excel_workbook(qc_path, payload, qc_bundle=qc_bundle)
+        qc_export_status.object = f"✅ QC Excel exported ({header}): {qc_path}"
+        qc_export_status.visible = True
+        pn.state.notifications.success(f"✅ QC Excel exported: {qc_path}", duration=3500)
+    except Exception as exc:
+        qc_export_status.object = f"❌ QC Excel export failed: {exc}"
+        qc_export_status.visible = True
+        pn.state.notifications.error(f"❌ QC Excel export failed: {exc}", duration=6000)
+        logger.exception("QC Excel export failed")
+
+
+btn_export_qc_excel.on_click(_export_qc_excel)
+
+
+def _export_qc_excel_workbook(
+    output_path: Path,
+    payload: dict[str, np.ndarray | pd.DataFrame | float],
+    qc_bundle: dict[str, pd.DataFrame] | None = None,
+) -> None:
     velocity_stack, depth_stack, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
     trap_stats = get_trap_stats(depth_stack)
 
@@ -2364,6 +2525,15 @@ def _export_qc_excel_workbook(output_path: Path, payload: dict[str, np.ndarray |
     wells_names = [str(name) for name in _well_names_internal().tolist()]
     wells_cov_df = _wells_covariance_dataframe()
     cov_condition = float(np.linalg.cond(wells_cov_df.to_numpy(dtype=float))) if not wells_cov_df.empty else float("nan")
+
+    if qc_bundle is None:
+        qc_bundle = _build_geostat_qc_bundle_payload(
+            velocity_stack=velocity_stack,
+            depth_stack=depth_stack,
+            avg_velocity_map=avg_velocity_map,
+            final_depth_map=final_depth_map,
+            trap_stats=trap_stats,
+        )
 
     readme_df = pd.DataFrame(
         {
@@ -2557,6 +2727,10 @@ def _export_qc_excel_workbook(output_path: Path, payload: dict[str, np.ndarray |
         else:
             pd.DataFrame({"Info": ["No wells defined"]}).to_excel(writer, sheet_name="Wells_Covariance", index=False)
         cov_diag_df.to_excel(writer, sheet_name="Wells_Covariance_QC", index=False)
+        qc_bundle.get("empirical_variogram_df", pd.DataFrame()).to_excel(writer, sheet_name="Empirical_Variogram", index=False)
+        qc_bundle.get("theoretical_variogram_df", pd.DataFrame()).to_excel(writer, sheet_name="Theoretical_Variogram", index=False)
+        qc_bundle.get("recommended_parameters_df", pd.DataFrame()).to_excel(writer, sheet_name="Geostat_Recommendations", index=False)
+        qc_bundle.get("coherence_checks_df", pd.DataFrame()).to_excel(writer, sheet_name="Engineering_Coherence", index=False)
 
         ws_map = writer.sheets["Map_QC"]
         ws_map["K1"] = "DepthFromAV_ExcelFormula"
@@ -2869,6 +3043,8 @@ card_6 = create_sidebar_card(
     sel_report_type,
     report_export_progress,
     btn_export_report,
+    btn_export_qc_excel,
+    qc_export_status,
 )
 card_7 = create_sidebar_card(
     "Export to Petrel",
@@ -2890,6 +3066,7 @@ card_8 = create_sidebar_card(
     _general_setting_row("Time", rg_time_units),
     _general_setting_row("Area", rg_area_units),
     _general_setting_row("Volume", rg_volume_units),
+    btn_apply_general_settings,
 )
 
 sidebar_items = [card_1, card_wells, card_4, card_3, card_2, card_5, card_6, card_7, card_8]

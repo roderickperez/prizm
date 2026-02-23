@@ -715,6 +715,8 @@ def _apply_surface_generation(_event=None) -> None:
     )
 
     _run_test_mode_diagnostics("surface_generate")
+    _surface_mode_hint.object = ""
+    _surface_mode_hint.visible = False
 
 
 def _on_surface_mode_change(event) -> None:
@@ -729,7 +731,8 @@ def _on_surface_mode_change(event) -> None:
         sld_vel_amp,
     ]:
         widget.visible = is_elongated
-    _apply_surface_generation()
+    _surface_mode_hint.object = "⚠️ Surface selection changed. Press **Generate / Update TWT Input** to load it."
+    _surface_mode_hint.visible = True
 
 
 def _on_depth_update_click(_event) -> None:

@@ -20,7 +20,8 @@ Latest implementation updates in this version:
 - map cut-line angle control (0–360°) with perpendicular structural section extraction
 - V2 wells workflow with compact table-based anchor-point editing (`Well Name`, `X`, `Y`, `Velocity`)
 - multi-well covariance conditioning in the realization engine (`core/engine_V2.py`)
-- report/QC expansion with well diagnostics and covariance exports
+- report/QC expansion with well diagnostics, covariance exports, empirical/theoretical variogram diagnostics, engineering coherence checks, and recommended variogram parameter outputs
+- explicit apply workflow for section controls (surface/wells/general settings now require their apply button)
 
 ---
 
@@ -83,7 +84,7 @@ When `pages/structuralUncertainty_V2.py` is loaded:
 
 ### Step C — Base Surfaces Creation
 
-`core/engine.py::build_surfaces()` returns deterministic model inputs:
+`core/engine_V2.py::build_surfaces()` returns deterministic model inputs:
 
 - deterministic TWT map in milliseconds (ms)
 - deterministic AV map in meters/second (m/s)
@@ -106,7 +107,7 @@ The simulation pipeline:
 
 Performance details:
 
-- stochastic field generation is handled in `core/engine.py`
+- stochastic field generation is handled in `core/engine_V2.py`
 - covariance FFT spectrum is cached per variogram/shape setting (avoids recomputation across realizations)
 - FFT operations use `scipy.fft` with multi-core workers for faster transforms
 - optional Torch FFT path is used when enabled and available
@@ -160,6 +161,12 @@ From mean AV map:
 - Nugget
 - Update Variogram button
 
+Default V2 variogram starting point:
+
+- Range = 1500 m
+- Sill = 1.0
+- Nugget = 0.1
+
 ### Closure Controls
 
 - contour search step (spill-point stepping increment)
@@ -192,7 +199,8 @@ From mean AV map:
 - `Show wells` toggle to display yellow well markers on maps and structural section
 - Well names are drawn on maps/section and included in report figures and Excel diagnostics
 - Hovering well markers in TWT / AV / Final Depth maps shows well name and XY coordinates
-- Table edits/add/remove trigger full stochastic refresh from velocity/depth realizations through isoprobability and volumetric distributions
+- Well location display in structural section is projected using the same nearest-grid anchor logic used in velocity conditioning (eliminates marker/index drift in section views and report images)
+- Apply rule: after edits/toggles, press `Update Well Location` to apply
 
 ---
 
@@ -235,6 +243,12 @@ Important dependency behavior:
 - Pressing Update Velocity & Depth Realizations also refreshes stochastic outputs.
 
 - Realization slider bounds auto-follow the realization count slider.
+
+- General settings (units) now use explicit apply behavior:
+  - change unit controls,
+  - then press `Apply General Settings`.
+
+- Surface mode changes are staged and applied only after pressing `Generate / Update TWT Input`.
 
 ---
 
@@ -286,10 +300,18 @@ Petrel/PWR integration flow:
 
 ### V2 QC/Report Additions
 
-- PDF parameters page includes wells-enabled status, well count, and covariance summary metrics.
-- Excel QC export includes:
+- PDF export now includes dedicated geostatistical QC pages:
+  - covariance matrix visualization + diagnostics
+  - empirical vs theoretical variogram comparison
+  - engineering coherence checks
+  - recommended parameter table (Range / Sill / Nugget)
+- Excel QC export now includes expanded sheets:
   - `Wells_Input` (well values and nearest-grid diagnostics)
-  - `Wells_Covariance` (well-to-well covariance matrix)
+  - `Wells_Covariance` and `Wells_Covariance_QC`
+  - `Empirical_Variogram`
+  - `Theoretical_Variogram`
+  - `Geostat_Recommendations`
+  - `Engineering_Coherence`
 
 ---
 
@@ -394,6 +416,7 @@ The current module provides the following operational capabilities:
   - Test-mode diagnostics and logging for finite/range checks
 - Reporting and export:
   - PNG/JPEG dashboard export
-  - Multi-page PDF export with summary + full per-realization tables
+  - Multi-page PDF export with summary + full per-realization tables + geostatistical QC pages
   - Styled PDF tables with OMV branding
+  - Companion QC Excel export generated with report (or standalone via `Export QC Excel`)
   - Petrel surface export for final depth map
