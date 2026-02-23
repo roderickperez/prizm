@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from petrel_surface_parser import parse_petrel_surface_file
+from structuralUncertainty_V2.petrel_surface_parser_V2 import parse_petrel_surface_file
 
 
 PETREL_FILE = Path(

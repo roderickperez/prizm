@@ -115,9 +115,10 @@ class ExtractedData:
 
 
 class ProjectEDADataService:
-    def __init__(self, db_path: Path | str):
+    def __init__(self, db_path: Path | str, test_mode: bool = False):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.test_mode = bool(test_mode)
         self.mnemonics_master, self.alias_to_group = _load_mnemonics_master()
         self._init_db()
 
@@ -199,6 +200,14 @@ class ProjectEDADataService:
             return {}
 
     def refresh_from_petrel(self, force: bool = False) -> dict[str, Any]:
+        if self.test_mode:
+            counts = self.get_counts()
+            if force or counts["wells"] == 0:
+                extracted = self._empty_data("Project EDA (Test Mode)")
+                self._persist_extracted(extracted)
+                self._seed_standardization()
+            return self.get_counts()
+
         counts = self.get_counts()
         if not force and counts["wells"] > 0:
             return counts
@@ -213,6 +222,16 @@ class ProjectEDADataService:
             from cegalprizm.pythontool import PetrelConnection
         except Exception:
             return self._synthetic_data("Synthetic Project")
+
+    def _empty_data(self, project_name: str) -> ExtractedData:
+        wells = pd.DataFrame(
+            columns=["well_guid", "well_name", "uwi", "x", "y", "latitude", "longitude", "location", "spud_date"]
+        )
+        logs = pd.DataFrame(
+            columns=["well_guid", "well_name", "log_name", "log_group", "mnemonic_group", "md", "value", "unit"]
+        )
+        tops = pd.DataFrame(columns=["well_guid", "well_name", "top_name", "md", "tvd"])
+        return ExtractedData(project_name=project_name, wells=wells, logs=logs, tops=tops)
 
         try:
             ptp = PetrelConnection(allow_experimental=True)
