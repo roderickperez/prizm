@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from functools import lru_cache
@@ -56,7 +57,7 @@ def build_pdf_tables_pages(
 
     fig_summary = plt.figure(figsize=(8.27, 11.69))
     add_pdf_logo(fig_summary, logo_path)
-    fig_summary.suptitle(f"{report_title} — Summary Table", fontsize=14, fontweight="bold", x=0.45, y=0.97)
+    fig_summary.suptitle(f"{report_title} - Summary Table", fontsize=14, fontweight="bold", x=0.45, y=0.97)
     ax_summary = fig_summary.add_subplot(111)
     ax_summary.axis("off")
 
@@ -86,7 +87,7 @@ def build_pdf_tables_pages(
         fig_detail = plt.figure(figsize=(8.27, 11.69))
         add_pdf_logo(fig_detail, logo_path)
         fig_detail.suptitle(
-            f"{report_title} — Per-Realization Results ({start + 1}-{end} of {total_rows})",
+            f"{report_title} - Per-Realization Results ({start + 1}-{end} of {total_rows})",
             fontsize=13,
             fontweight="bold",
             x=0.45,

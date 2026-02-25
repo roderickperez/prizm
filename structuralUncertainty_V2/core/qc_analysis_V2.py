@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from pathlib import Path
@@ -248,7 +249,7 @@ def build_pdf_geostat_qc_pages(
 
     fig_cov = plt.figure(figsize=(11.69, 8.27))
     add_pdf_logo(fig_cov, logo_path)
-    fig_cov.suptitle(f"{report_title} — Covariance QC", fontsize=13, fontweight="bold", x=0.45, y=0.97)
+    fig_cov.suptitle(f"{report_title} - Covariance QC", fontsize=13, fontweight="bold", x=0.45, y=0.97)
     ax_cov = fig_cov.add_subplot(1, 2, 1)
     ax_txt = fig_cov.add_subplot(1, 2, 2)
 
@@ -278,7 +279,7 @@ def build_pdf_geostat_qc_pages(
 
     fig_vario = plt.figure(figsize=(11.69, 8.27))
     add_pdf_logo(fig_vario, logo_path)
-    fig_vario.suptitle(f"{report_title} — Variogram QC", fontsize=13, fontweight="bold", x=0.45, y=0.97)
+    fig_vario.suptitle(f"{report_title} - Variogram QC", fontsize=13, fontweight="bold", x=0.45, y=0.97)
     ax_v = fig_vario.add_subplot(1, 2, 1)
     ax_r = fig_vario.add_subplot(1, 2, 2)
 
@@ -310,7 +311,7 @@ def build_pdf_geostat_qc_pages(
 
     fig_coh = plt.figure(figsize=(11.69, 8.27))
     add_pdf_logo(fig_coh, logo_path)
-    fig_coh.suptitle(f"{report_title} — Engineering Coherence QC", fontsize=13, fontweight="bold", x=0.45, y=0.97)
+    fig_coh.suptitle(f"{report_title} - Engineering Coherence QC", fontsize=13, fontweight="bold", x=0.45, y=0.97)
     ax_c = fig_coh.add_subplot(111)
     ax_c.axis("off")
     coh_df = qc_bundle.get("coherence_checks_df", pd.DataFrame())

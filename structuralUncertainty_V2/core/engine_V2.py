@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from functools import lru_cache
@@ -15,6 +16,7 @@ except Exception:
 ProgressCb = Callable[[int, int], None] | None
 
 
+@lru_cache(maxsize=1)
 def _safe_workers() -> int:
     try:
         import os
@@ -113,7 +115,7 @@ def _generate_field_numpy(
         nugget=float(nugget),
         sill=float(sill),
     )
-    white_noise = rng.normal(0.0, 1.0, shape)
+    white_noise = rng.normal(0.0, 1.0, shape).astype(np.float32, copy=False)
     field_fft = sp_fft.fft2(white_noise, workers=_safe_workers())
     spatial_field = np.real(sp_fft.ifft2(field_fft * sqrt_spectrum, workers=_safe_workers()))
 
@@ -214,10 +216,16 @@ def generate_velocity_depth_stacks(
     well_velocity: list[float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
+    twt_ms = np.asarray(twt_ms, dtype=np.float32)
+    base_velocity = np.asarray(base_velocity, dtype=np.float32)
+    x_coords = np.asarray(x_coords, dtype=float)
+    y_coords = np.asarray(y_coords, dtype=float)
+
     stack = np.empty((n_maps, *twt_ms.shape), dtype=np.float32)
 
     conditioning_weights = None
-    well_indices = None
+    well_idx_y = None
+    well_idx_x = None
     s_target = None
 
     if well_x and well_y and well_velocity and len(well_x) > 0:
@@ -230,16 +238,38 @@ def generate_velocity_depth_stacks(
         C_ww = _compute_covariance_matrix(ww_dist, model, range_val, sill, nugget)
 
         X, Y = np.meshgrid(x_coords, y_coords)
-        C_xw = np.zeros((n_wells, Y.shape[0], X.shape[1]), dtype=float)
-        well_indices = []
+        dxw = X[None, :, :] - w_x[:, None, None]
+        dyw = Y[None, :, :] - w_y[:, None, None]
+        h_xw = np.sqrt(dxw * dxw + dyw * dyw)
+        C_xw = _compute_covariance_matrix(h_xw, model, range_val, sill, nugget)
 
-        for w in range(n_wells):
-            h_xw = np.sqrt((X - w_x[w]) ** 2 + (Y - w_y[w]) ** 2)
-            C_xw[w] = _compute_covariance_matrix(h_xw, model, range_val, sill, nugget)
+        if x_coords.size < 2:
+            well_idx_x = np.array([int(np.argmin(np.abs(x_coords - wx))) for wx in w_x], dtype=int)
+        else:
+            x_inc = bool(x_coords[-1] >= x_coords[0])
+            x_search = x_coords if x_inc else x_coords[::-1]
+            x_pos = np.searchsorted(x_search, w_x)
+            x_pos = np.clip(x_pos, 1, len(x_search) - 1)
+            x_l = x_search[x_pos - 1]
+            x_r = x_search[x_pos]
+            well_idx_x = np.where(np.abs(w_x - x_l) <= np.abs(w_x - x_r), x_pos - 1, x_pos)
+            if not x_inc:
+                well_idx_x = (len(x_coords) - 1) - well_idx_x
+            well_idx_x = well_idx_x.astype(int)
 
-            w_idx_x = int(np.argmin(np.abs(x_coords - w_x[w])))
-            w_idx_y = int(np.argmin(np.abs(y_coords - w_y[w])))
-            well_indices.append((w_idx_y, w_idx_x))
+        if y_coords.size < 2:
+            well_idx_y = np.array([int(np.argmin(np.abs(y_coords - wy))) for wy in w_y], dtype=int)
+        else:
+            y_inc = bool(y_coords[-1] >= y_coords[0])
+            y_search = y_coords if y_inc else y_coords[::-1]
+            y_pos = np.searchsorted(y_search, w_y)
+            y_pos = np.clip(y_pos, 1, len(y_search) - 1)
+            y_l = y_search[y_pos - 1]
+            y_r = y_search[y_pos]
+            well_idx_y = np.where(np.abs(w_y - y_l) <= np.abs(w_y - y_r), y_pos - 1, y_pos)
+            if not y_inc:
+                well_idx_y = (len(y_coords) - 1) - well_idx_y
+            well_idx_y = well_idx_y.astype(int)
 
         C_xw_flat = C_xw.reshape(n_wells, -1)
         try:
@@ -248,13 +278,13 @@ def generate_velocity_depth_stacks(
             C_ww = C_ww + np.eye(n_wells) * 1e-4
             weights_flat = np.linalg.solve(C_ww, C_xw_flat)
 
-        conditioning_weights = weights_flat.reshape(n_wells, Y.shape[0], X.shape[1])
+        conditioning_weights = weights_flat.reshape(n_wells, Y.shape[0], X.shape[1]).astype(np.float32, copy=False)
 
-        s_target = np.zeros(n_wells, dtype=float)
-        for w in range(n_wells):
-            w_idx_y, w_idx_x = well_indices[w]
-            v_base_well = float(base_velocity[w_idx_y, w_idx_x])
-            s_target[w] = (w_v[w] - v_base_well) / velocity_std if velocity_std > 0 else 0.0
+        v_base_wells = base_velocity[well_idx_y, well_idx_x].astype(float, copy=False)
+        if velocity_std > 0:
+            s_target = ((w_v - v_base_wells) / velocity_std).astype(np.float32, copy=False)
+        else:
+            s_target = np.zeros(n_wells, dtype=np.float32)
 
     for idx in range(n_maps):
         if use_torch and torch is not None:
@@ -269,11 +299,8 @@ def generate_velocity_depth_stacks(
                 filtered = filtered / std_val
             field = filtered.astype(np.float32)
 
-        if conditioning_weights is not None and well_indices is not None and s_target is not None:
-            s_sim = np.zeros(len(well_indices), dtype=float)
-            for w, (w_idx_y, w_idx_x) in enumerate(well_indices):
-                s_sim[w] = float(field[w_idx_y, w_idx_x])
-
+        if conditioning_weights is not None and well_idx_y is not None and well_idx_x is not None and s_target is not None:
+            s_sim = field[well_idx_y, well_idx_x].astype(np.float32, copy=False)
             diff = s_target - s_sim
             conditioning_field = np.tensordot(diff, conditioning_weights, axes=([0], [0]))
             field = field + conditioning_field.astype(np.float32)
@@ -282,10 +309,12 @@ def generate_velocity_depth_stacks(
         if progress_cb is not None:
             progress_cb(idx + 1, n_maps)
 
-    velocity_stack = base_velocity[None, :, :] + stack * velocity_std
-    velocity_stack = np.maximum(velocity_stack, 1200.0)
+    velocity_stack = stack
+    velocity_stack *= np.float32(velocity_std)
+    velocity_stack += base_velocity[None, :, :]
+    np.maximum(velocity_stack, np.float32(1200.0), out=velocity_stack)
 
-    avg_velocity_map = np.mean(velocity_stack, axis=0)
+    avg_velocity_map = np.mean(velocity_stack, axis=0, dtype=np.float32)
     final_depth_map = (twt_ms * avg_velocity_map) / 2000.0
     depth_stack = (twt_ms[None, :, :] * velocity_stack) / 2000.0
 
@@ -374,12 +403,13 @@ def compute_trap_statistics(
         crest_depths[map_idx] = crest_depth
         trap_masks[map_idx] = trap_mask
 
-        if not np.any(trap_mask):
+        trap_cell_count = int(np.sum(trap_mask))
+        if trap_cell_count == 0:
             if progress_cb is not None:
                 progress_cb(map_idx + 1, n_maps)
             continue
 
-        area = float(np.sum(trap_mask) * cell_area)
+        area = float(trap_cell_count * cell_area)
         areas[map_idx] = area
         thickness_total[map_idx] = max(0.0, (crest_depth - spill_depth) if is_negative_domain else (spill_depth - crest_depth))
 

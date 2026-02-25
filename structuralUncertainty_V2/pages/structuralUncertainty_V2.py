@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 import ctypes
 import json
 import logging
 import os
 import platform
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -58,11 +60,13 @@ apply_dll_fix()
 # ==============================================================================
 #  PATH RESOLUTION & THEME IMPORTS
 # ==============================================================================
-ROOT_DIR = Path(__file__).resolve().parents[2]
+APP_DIR = Path(__file__).resolve().parent
+STRUCTURAL_DIR = APP_DIR.parent
+ROOT_DIR = STRUCTURAL_DIR.parent
+
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-STRUCTURAL_DIR = ROOT_DIR / "structuralUncertainty_V2"
 if str(STRUCTURAL_DIR) not in sys.path:
     sys.path.insert(0, str(STRUCTURAL_DIR))
 
@@ -79,7 +83,8 @@ from core.qc_analysis_V2 import (  # noqa: E402
     build_geostat_qc_bundle as core_build_geostat_qc_bundle,
     build_pdf_geostat_qc_pages as core_build_pdf_geostat_qc_pages,
 )
-from structuralUncertainty_V2.petrel_surface_parser_V2 import parse_petrel_surface_file  # noqa: E402
+# Fixed import: Directly import from the folder without hardcoding the folder name
+from petrel_surface_parser_V2 import parse_petrel_surface_file  # noqa: E402
 
 try:
     from shared.ui.omv_theme import (
@@ -139,12 +144,15 @@ except ImportError:
 APP_TITLE = "Structural Uncertainty Evaluation"
 DOCUMENTATION_URL = "https://example.com/docs"
 
+ARGS_LOWER = [str(arg).lower() for arg in sys.argv]
+TEST_MODE = "--test" in ARGS_LOWER
+DEBUG_TRACE_MODE = TEST_MODE or "--debug" in ARGS_LOWER
+
 ASSETS_DIR = ROOT_DIR / "images" / "OMV_brandLogoPack" / "OMV_brandLogoPack"
 LOGO_PATH = ASSETS_DIR / "OMV_logo_Neon_Small.png"
 FAVICON_PATH = ASSETS_DIR / "OMV_logo_Blue_Small.png"
 REPORT_TABLE_LOGO_PATH = ASSETS_DIR / "OMV_logo_RGB_Deep-Blue.png"
 
-APP_DIR = Path(__file__).resolve().parent
 LOG_DIR = APP_DIR / "logs"
 
 is_dark_mode = is_dark_mode_from_state()
@@ -158,17 +166,20 @@ def setup_structural_logger(log_dir: Path, logger_name: str = "structural_uncert
     log_file = log_dir / f"structural_uncertainty_{time.strftime('%Y%m%d_%H%M%S')}.log"
 
     logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG if DEBUG_TRACE_MODE else logging.INFO)
     logger.handlers.clear()
     logger.propagate = False
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(funcName)s | %(message)s"
+    )
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
     stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.DEBUG if DEBUG_TRACE_MODE else logging.INFO)
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
@@ -182,11 +193,51 @@ def setup_structural_logger(log_dir: Path, logger_name: str = "structural_uncert
 
     logger.info("Structural Uncertainty logger initialized")
     logger.info("Log file: %s", log_file)
+    logger.info("Runtime modes | test_mode=%s debug_trace=%s", TEST_MODE, DEBUG_TRACE_MODE)
     return logger
 
 
 logger = setup_structural_logger(LOG_DIR)
 av_depth_tabs = None
+input_surface_tabs = None
+
+
+def _install_global_exception_hooks() -> None:
+    original_excepthook = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_traceback):
+        try:
+            logger.critical("UNCAUGHT_EXCEPTION", exc_info=(exc_type, exc_value, exc_traceback))
+        except Exception:
+            pass
+        try:
+            original_excepthook(exc_type, exc_value, exc_traceback)
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+
+    if hasattr(threading, "excepthook"):
+        original_thread_hook = threading.excepthook
+
+        def _thread_hook(args):
+            try:
+                logger.critical(
+                    "UNCAUGHT_THREAD_EXCEPTION | thread=%s",
+                    getattr(args.thread, "name", "unknown"),
+                    exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+                )
+            except Exception:
+                pass
+            try:
+                original_thread_hook(args)
+            except Exception:
+                pass
+
+        threading.excepthook = _thread_hook
+
+
+_install_global_exception_hooks()
 
 
 def load_snapshot_payload() -> dict:
@@ -206,7 +257,10 @@ PROJECT_NAME = str(SNAPSHOT_PAYLOAD.get("project", "Unknown"))
 IMPORTED_SURFACE_GUID = SNAPSHOT_PAYLOAD.get("selected_surface_guid")
 IMPORTED_SURFACE_NAME = str(SNAPSHOT_PAYLOAD.get("selected_surface_name", "Imported Surface"))
 IMPORTED_SURFACE_DATA = SNAPSHOT_PAYLOAD.get("imported_surface") if isinstance(SNAPSHOT_PAYLOAD.get("imported_surface"), dict) else None
-TEST_SURFACE_FILE = ROOT_DIR / "referenceDocumentation" / "structuralUncertaintyEvaluation" / "testData" / "surfaceTest"
+IMPORTED_SURFACE_TIME_DATA = SNAPSHOT_PAYLOAD.get("imported_surface_time") if isinstance(SNAPSHOT_PAYLOAD.get("imported_surface_time"), dict) else None
+IMPORTED_SURFACE_DEPTH_DATA = SNAPSHOT_PAYLOAD.get("imported_surface_depth") if isinstance(SNAPSHOT_PAYLOAD.get("imported_surface_depth"), dict) else None
+TEST_SURFACE_TIME_FILE = ROOT_DIR / "referenceDocumentation" / "structuralUncertaintyEvaluation" / "testData" / "surfaceTime_earhVision"
+TEST_SURFACE_DEPTH_FILE = ROOT_DIR / "referenceDocumentation" / "structuralUncertaintyEvaluation" / "testData" / "surfaceDepth_earhVision"
 
 
 # ==============================================================================
@@ -218,8 +272,8 @@ custom_css = f"""
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) !important;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) !important;
     grid-template-areas:
-        \"map section hists\"
-        \"realization iso hists\";
+        "map section hists"
+        "realization iso hists";
     gap: 10px !important;
     height: calc(100vh - 150px) !important;
     overflow: hidden !important;
@@ -297,7 +351,7 @@ radio_group_stylesheets = get_radio_button_stylesheets()
 
 
 # ==============================================================================
-#  SYNTHETIC INPUTS: TWT + DETERMINISTIC VELOCITY
+#  INPUT SURFACES: IMPORTED TIME + DEPTH
 # ==============================================================================
 x_values = np.linspace(0, 10000, 100)
 y_values = np.linspace(0, 10000, 100)
@@ -307,30 +361,82 @@ DEFAULT_SILL = 1.0
 DEFAULT_NUGGET = 0.1
 
 
-def _parse_imported_surface() -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    if "--test" in sys.argv and TEST_SURFACE_FILE.exists():
-        try:
-            parsed = parse_petrel_surface_file(TEST_SURFACE_FILE)
-            x_arr = np.asarray(parsed["x"], dtype=np.float32)
-            y_arr = np.asarray(parsed["y"], dtype=np.float32)
-            z_arr = np.asarray(parsed["z"], dtype=np.float32)
-            return x_arr, y_arr, z_arr
-        except Exception as exc:
-            logger.warning("Test-mode surface load failed: %s", exc)
-
-    if IMPORTED_SURFACE_DATA:
-        try:
-            x_arr = np.asarray(IMPORTED_SURFACE_DATA.get("x", []), dtype=float)
-            y_arr = np.asarray(IMPORTED_SURFACE_DATA.get("y", []), dtype=float)
-            z_arr = np.asarray(IMPORTED_SURFACE_DATA.get("z", []), dtype=float)
-            if x_arr.ndim == 1 and y_arr.ndim == 1 and z_arr.ndim == 2 and z_arr.shape == (len(y_arr), len(x_arr)) and len(x_arr) > 1 and len(y_arr) > 1:
-                return x_arr, y_arr, z_arr.astype(np.float32)
-        except Exception:
-            pass
+def _coerce_surface_dict(surface_dict: dict | None) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    if not isinstance(surface_dict, dict):
+        return None
+    try:
+        x_arr = np.asarray(surface_dict.get("x", []), dtype=float)
+        y_arr = np.asarray(surface_dict.get("y", []), dtype=float)
+        z_arr = np.asarray(surface_dict.get("z", []), dtype=float)
+        if x_arr.ndim == 1 and y_arr.ndim == 1 and z_arr.ndim == 2 and z_arr.shape == (len(y_arr), len(x_arr)) and len(x_arr) > 1 and len(y_arr) > 1:
+            return x_arr.astype(np.float32), y_arr.astype(np.float32), z_arr.astype(np.float32)
+    except Exception:
+        return None
     return None
 
 
-IMPORTED_SURFACE_PARSED = _parse_imported_surface()
+def _parse_imported_surfaces() -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray] | None, tuple[np.ndarray, np.ndarray, np.ndarray] | None]:
+    time_surface = None
+    depth_surface = None
+
+    if TEST_MODE:
+        if TEST_SURFACE_TIME_FILE.exists():
+            try:
+                parsed_t = parse_petrel_surface_file(TEST_SURFACE_TIME_FILE)
+                time_surface = (
+                    np.asarray(parsed_t["x"], dtype=np.float32),
+                    np.asarray(parsed_t["y"], dtype=np.float32),
+                    np.asarray(parsed_t["z"], dtype=np.float32),
+                )
+                logger.info("Loaded test time surface: %s", TEST_SURFACE_TIME_FILE)
+            except Exception as exc:
+                logger.warning("Test-mode time surface load failed: %s", exc)
+        if TEST_SURFACE_DEPTH_FILE.exists():
+            try:
+                parsed_d = parse_petrel_surface_file(TEST_SURFACE_DEPTH_FILE)
+                depth_surface = (
+                    np.asarray(parsed_d["x"], dtype=np.float32),
+                    np.asarray(parsed_d["y"], dtype=np.float32),
+                    np.asarray(parsed_d["z"], dtype=np.float32),
+                )
+                logger.info("Loaded test depth surface: %s", TEST_SURFACE_DEPTH_FILE)
+            except Exception as exc:
+                logger.warning("Test-mode depth surface load failed: %s", exc)
+
+    if time_surface is None:
+        time_surface = _coerce_surface_dict(IMPORTED_SURFACE_TIME_DATA)
+    if depth_surface is None:
+        depth_surface = _coerce_surface_dict(IMPORTED_SURFACE_DEPTH_DATA)
+
+    if time_surface is None and depth_surface is None:
+        fallback = _coerce_surface_dict(IMPORTED_SURFACE_DATA)
+        if fallback is not None:
+            time_surface = fallback
+
+    return time_surface, depth_surface
+
+
+def _resample_depth_to_time_grid(
+    depth_surface: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+    x_time: np.ndarray,
+    y_time: np.ndarray,
+) -> np.ndarray | None:
+    if depth_surface is None:
+        return None
+    try:
+        x_d, y_d, z_d = depth_surface
+        da_d = xr.DataArray(np.asarray(z_d, dtype=float), coords=[np.asarray(y_d, dtype=float), np.asarray(x_d, dtype=float)], dims=["y", "x"])
+        da_interp = da_d.interp(x=np.asarray(x_time, dtype=float), y=np.asarray(y_time, dtype=float), method="linear")
+        arr = np.asarray(da_interp.values, dtype=float)
+        if not np.isfinite(arr).all():
+            fill_val = float(np.nanmean(arr)) if np.isfinite(arr).any() else 0.0
+            arr = np.where(np.isfinite(arr), arr, fill_val)
+        return arr.astype(np.float32)
+    except Exception:
+        return None
+
+
+IMPORTED_TIME_SURFACE_PARSED, IMPORTED_DEPTH_SURFACE_PARSED = _parse_imported_surfaces()
 
 surface_state: dict[str, object] = {
     "mode": "Synthetic TWT Input",
@@ -343,31 +449,72 @@ wells_refresh_token = pn.widgets.IntInput(name="_wells_refresh_token", value=0, 
 stack_cache: dict[str, object] = {"key": None, "data": None}
 trap_cache: dict[str, object] = {"key": None, "data": None}
 hist_panel_cache: dict[str, object] = {"key": None, "panel": None}
+section_line_cache: dict[str, object] = {"key": None, "value": (np.array([], dtype=float), np.array([], dtype=float))}
 wells_applied_state: dict[str, object] = {"df": pd.DataFrame(columns=["Well Name", "X", "Y", "Velocity"])}
-MAX_VELOCITY_STD_FPS = 50.0
+MAX_VELOCITY_STD_FPS = 250.0
+
+
+def _normalize_imported_depth_to_m(depth_values, twt_ms_values) -> np.ndarray:
+    depth_arr = np.asarray(depth_values, dtype=float)
+    twt_arr = np.asarray(twt_ms_values, dtype=float)
+    if depth_arr.size == 0:
+        return depth_arr.astype(np.float32)
+
+    finite_depth = depth_arr[np.isfinite(depth_arr)]
+    if finite_depth.size == 0:
+        return np.nan_to_num(depth_arr, nan=0.0).astype(np.float32)
+
+    depth_abs_med = float(np.nanmedian(np.abs(finite_depth)))
+    finite_twt = np.abs(twt_arr[np.isfinite(twt_arr)])
+    twt_abs_med = float(np.nanmedian(finite_twt)) if finite_twt.size > 0 else 1.0
+    twt_abs_med = max(twt_abs_med, 1.0)
+    implied_vel_raw = depth_abs_med * 2000.0 / twt_abs_med
+
+    if implied_vel_raw > 8000.0:
+        logger.info(
+            "Imported depth interpreted as feet (median |z|=%.1f). Converted to meters.",
+            depth_abs_med,
+        )
+        return np.asarray(depth_arr * 0.3048, dtype=np.float32)
+
+    return np.asarray(depth_arr, dtype=np.float32)
 
 
 def _initialize_surface_state() -> None:
-    use_imported = ("--test" in sys.argv and IMPORTED_SURFACE_PARSED is not None)
-    if use_imported:
-        x_arr, y_arr, z_arr = IMPORTED_SURFACE_PARSED
-        twt_ms = z_arr
-        vel = np.full_like(twt_ms, 3050.0, dtype=np.float32)
-        surface_state["mode"] = "Imported Petrel Surface"
-        x_ref, y_ref = x_arr, y_arr
-    else:
-        twt_ms, vel = core_build_surfaces("Synthetic TWT Input", x_values, y_values)
-        surface_state["mode"] = "Synthetic TWT Input"
-        x_ref, y_ref = x_values, y_values
+    time_surface = IMPORTED_TIME_SURFACE_PARSED
+    depth_surface = IMPORTED_DEPTH_SURFACE_PARSED
 
-    surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_ref, x_ref], dims=["y", "x"], name="TWT")
+    if time_surface is not None:
+        x_ref, y_ref, twt_ms = time_surface
+    else:
+        x_ref, y_ref = x_values, y_values
+        twt_ms = core_build_surfaces("Synthetic TWT Input", x_values, y_values)[0]
+
+    if depth_surface is not None:
+        x_d, y_d, depth_in = depth_surface
+        if (len(x_d) == len(x_ref)) and (len(y_d) == len(y_ref)):
+            depth_m = _normalize_imported_depth_to_m(depth_in, twt_ms)
+        else:
+            depth_resampled = _resample_depth_to_time_grid(depth_surface, x_ref, y_ref)
+            depth_m = _normalize_imported_depth_to_m(depth_resampled, twt_ms) if depth_resampled is not None else (np.asarray(twt_ms, dtype=float) * 3050.0) / 2000.0
+    else:
+        depth_m = (np.asarray(twt_ms, dtype=float) * 3050.0) / 2000.0
+
+    safe_twt = np.where(np.abs(np.asarray(twt_ms, dtype=float)) > 1e-6, np.asarray(twt_ms, dtype=float), np.nan)
+    vel = np.where(np.isfinite(safe_twt), (np.asarray(depth_m, dtype=float) / safe_twt) * 2000.0, np.nan)
+    vel = np.nan_to_num(vel, nan=3000.0)
+    vel = np.maximum(vel, 500.0).astype(np.float32)
+
+    surface_state["mode"] = "Imported Time + Depth"
+    surface_state["twt"] = xr.DataArray(np.asarray(twt_ms, dtype=np.float32), coords=[y_ref, x_ref], dims=["y", "x"], name="TWT")
+    surface_state["depth_input"] = xr.DataArray(np.asarray(depth_m, dtype=np.float32), coords=[y_ref, x_ref], dims=["y", "x"], name="DepthInput")
     surface_state["velocity"] = xr.DataArray(vel, coords=[y_ref, x_ref], dims=["y", "x"], name="Velocity")
     surface_state["x_coords"] = x_ref
     surface_state["y_coords"] = y_ref
     surface_state["dx"] = float(np.mean(np.diff(x_ref)))
     surface_state["dy"] = float(np.mean(np.diff(y_ref)))
     surface_state["cell_area"] = float(surface_state["dx"] * surface_state["dy"])
-    surface_state["imported_available"] = IMPORTED_SURFACE_PARSED is not None
+    surface_state["imported_available"] = (time_surface is not None)
     surface_state["imported_name"] = IMPORTED_SURFACE_NAME
 
 
@@ -381,6 +528,42 @@ def _set_progress(value: int) -> None:
         pass
 
 
+def _notify_info(message: str, duration: int = 3000) -> None:
+    try:
+        notifications = getattr(pn.state, "notifications", None)
+        if notifications is not None:
+            notifications.info(message, duration=duration)
+    except Exception:
+        pass
+
+
+def _notify_success(message: str, duration: int = 3000) -> None:
+    try:
+        notifications = getattr(pn.state, "notifications", None)
+        if notifications is not None:
+            notifications.success(message, duration=duration)
+    except Exception:
+        pass
+
+
+def _notify_warning(message: str, duration: int = 3000) -> None:
+    try:
+        notifications = getattr(pn.state, "notifications", None)
+        if notifications is not None:
+            notifications.warning(message, duration=duration)
+    except Exception:
+        pass
+
+
+def _notify_error(message: str, duration: int = 3000) -> None:
+    try:
+        notifications = getattr(pn.state, "notifications", None)
+        if notifications is not None:
+            notifications.error(message, duration=duration)
+    except Exception:
+        pass
+
+
 def _invalidate_caches() -> None:
     stack_cache["key"] = None
     stack_cache["data"] = None
@@ -388,6 +571,8 @@ def _invalidate_caches() -> None:
     trap_cache["data"] = None
     hist_panel_cache["key"] = None
     hist_panel_cache["panel"] = None
+    section_line_cache["key"] = None
+    section_line_cache["value"] = (np.array([], dtype=float), np.array([], dtype=float))
 
 
 def _sync_section_y_range() -> None:
@@ -406,9 +591,20 @@ def _sync_section_y_range() -> None:
 
 def _refresh_unit_labels() -> None:
     sld_contours.name = f"Contours Range Number ({'milliseconds' if rg_time_units.value == 'milliseconds' else 'seconds'})"
+    sld_input_depth_contours.name = f"Depth Contour Range Number ({_depth_unit_label()})"
     sld_c_inc.name = f"Contour Search Step ({_depth_unit_label()})"
     sld_depth_contours.name = f"Contours Range Number ({_depth_unit_label()})"
     sld_y_range.name = f"Depth Y-Axis Range ({_depth_unit_label()})"
+    sld_elong_major.name = f"Elongated Major Axis Sigma ({_xy_unit_label()})"
+    sld_elong_minor.name = f"Elongated Minor Axis Sigma ({_xy_unit_label()})"
+    sld_twt_base.name = f"TWT Base ({_time_unit_label()})"
+    sld_twt_amp.name = f"TWT Closure Amplitude ({_time_unit_label()})"
+    sld_vel_base.name = f"Velocity Base ({rg_velocity_units.value})"
+    sld_vel_amp.name = f"Velocity Dome Amplitude ({rg_velocity_units.value})"
+    if "sld_thick_mean" in globals():
+        sld_thick_mean.name = f"Thickness Mean ({_depth_unit_label()})"
+    if "sld_thick_std" in globals():
+        sld_thick_std.name = f"Thickness Std. Dev. ({_depth_unit_label()})"
     _apply_velocity_std_recommendation()
 
 
@@ -417,7 +613,7 @@ def _trigger_refresh() -> None:
 
 
 def _mark_general_settings_pending() -> None:
-    pn.state.notifications.info("General settings changed. Press 'Apply General Settings' to update plots.", duration=2800)
+    _notify_info("General settings changed. Press 'Apply General Settings' to update plots.", duration=2800)
 
 
 def _apply_general_settings(_event=None) -> None:
@@ -431,6 +627,8 @@ def _on_velocity_units_change(event) -> None:
     new_to_mps = 1.0 if event.new == "m/s" else 0.3048
     current_mps = float(sld_std_dev.value) * old_to_mps
     sld_std_dev.value = current_mps / new_to_mps
+    sld_vel_base.value = float(sld_vel_base.value) * old_to_mps / new_to_mps
+    sld_vel_amp.value = float(sld_vel_amp.value) * old_to_mps / new_to_mps
     if "tbl_wells" in globals() and isinstance(tbl_wells.value, pd.DataFrame) and not tbl_wells.value.empty:
         df = tbl_wells.value.copy()
         if "Velocity" in df.columns:
@@ -448,6 +646,8 @@ def _on_velocity_units_change(event) -> None:
 def _on_xy_units_change(event) -> None:
     old_factor = 1.0 if event.old == "meters" else 3.280839895013123
     new_factor = 1.0 if event.new == "meters" else 3.280839895013123
+    sld_elong_major.value = float(sld_elong_major.value) * old_factor / new_factor
+    sld_elong_minor.value = float(sld_elong_minor.value) * old_factor / new_factor
     if "tbl_wells" in globals() and isinstance(tbl_wells.value, pd.DataFrame) and not tbl_wells.value.empty:
         df = tbl_wells.value.copy()
         if "X" in df.columns:
@@ -472,11 +672,21 @@ def _on_depth_units_change(event) -> None:
     new_to_m = 1.0 if event.new == "meters" else 0.3048
 
     sld_c_inc.value = float(sld_c_inc.value) * old_to_m / new_to_m
+    sld_input_depth_contours.value = float(sld_input_depth_contours.value) * old_to_m / new_to_m
     sld_thick_mean.value = float(sld_thick_mean.value) * old_to_m / new_to_m
     sld_thick_std.value = float(sld_thick_std.value) * old_to_m / new_to_m
     sld_depth_contours.value = float(sld_depth_contours.value) * old_to_m / new_to_m
 
     _sync_section_y_range()
+    _refresh_unit_labels()
+    _mark_general_settings_pending()
+
+
+def _on_time_units_change(event) -> None:
+    old_factor = 1.0 if event.old == "milliseconds" else 1.0 / 1000.0
+    new_factor = 1.0 if event.new == "milliseconds" else 1.0 / 1000.0
+    sld_twt_base.value = float(sld_twt_base.value) * old_factor / new_factor
+    sld_twt_amp.value = float(sld_twt_amp.value) * old_factor / new_factor
     _refresh_unit_labels()
     _mark_general_settings_pending()
 
@@ -502,6 +712,22 @@ def _surface_xy_bounds() -> tuple[float, float, float, float, np.ndarray, np.nda
 
 def _applied_section_angle() -> float:
     return float(surface_state.get("section_angle_applied", 0.0))
+
+
+def _section_line_display_coords(angle_deg: float) -> tuple[np.ndarray, np.ndarray]:
+    cache_key = (int(surface_state.get("token", 0)), round(float(angle_deg), 4), str(rg_xy_units.value))
+    if section_line_cache.get("key") == cache_key:
+        cached_x, cached_y = section_line_cache.get("value", (np.array([], dtype=float), np.array([], dtype=float)))
+        return np.asarray(cached_x, dtype=float), np.asarray(cached_y, dtype=float)
+
+    x_coords_m = np.asarray(surface_state.get("x_coords", surface_state["twt"].x.values), dtype=float)
+    y_coords_m = np.asarray(surface_state.get("y_coords", surface_state["twt"].y.values), dtype=float)
+    xs_line_m, ys_line_m = core_line_through_center(x_coords_m, y_coords_m, float(angle_deg))
+    xs_line = _xy_from_m(xs_line_m)
+    ys_line = _xy_from_m(ys_line_m)
+    section_line_cache["key"] = cache_key
+    section_line_cache["value"] = (xs_line, ys_line)
+    return xs_line, ys_line
 
 
 def _project_wells_to_section_distance_m(
@@ -632,8 +858,35 @@ def _well_section_anchor_xy_m() -> tuple[np.ndarray, np.ndarray]:
     x_coords = np.asarray(surface_state.get("x_coords", surface_state["twt"].x.values), dtype=float)
     y_coords = np.asarray(surface_state.get("y_coords", surface_state["twt"].y.values), dtype=float)
 
-    nearest_idx_x = np.array([int(np.argmin(np.abs(x_coords - wx))) for wx in well_x_m], dtype=int)
-    nearest_idx_y = np.array([int(np.argmin(np.abs(y_coords - wy))) for wy in well_y_m], dtype=int)
+    if x_coords.size < 2 or y_coords.size < 2:
+        nearest_idx_x = np.array([int(np.argmin(np.abs(x_coords - wx))) for wx in well_x_m], dtype=int)
+        nearest_idx_y = np.array([int(np.argmin(np.abs(y_coords - wy))) for wy in well_y_m], dtype=int)
+    else:
+        x_inc = bool(x_coords[-1] >= x_coords[0])
+        y_inc = bool(y_coords[-1] >= y_coords[0])
+        x_search = x_coords if x_inc else x_coords[::-1]
+        y_search = y_coords if y_inc else y_coords[::-1]
+
+        x_pos = np.searchsorted(x_search, well_x_m)
+        y_pos = np.searchsorted(y_search, well_y_m)
+        x_pos = np.clip(x_pos, 1, len(x_search) - 1)
+        y_pos = np.clip(y_pos, 1, len(y_search) - 1)
+
+        x_left = x_search[x_pos - 1]
+        x_right = x_search[x_pos]
+        y_left = y_search[y_pos - 1]
+        y_right = y_search[y_pos]
+
+        nearest_idx_x = np.where(np.abs(well_x_m - x_left) <= np.abs(well_x_m - x_right), x_pos - 1, x_pos)
+        nearest_idx_y = np.where(np.abs(well_y_m - y_left) <= np.abs(well_y_m - y_right), y_pos - 1, y_pos)
+
+        if not x_inc:
+            nearest_idx_x = (len(x_coords) - 1) - nearest_idx_x
+        if not y_inc:
+            nearest_idx_y = (len(y_coords) - 1) - nearest_idx_y
+
+        nearest_idx_x = nearest_idx_x.astype(int)
+        nearest_idx_y = nearest_idx_y.astype(int)
 
     return x_coords[nearest_idx_x], y_coords[nearest_idx_y]
 
@@ -675,6 +928,50 @@ def _covariance_values(h: np.ndarray, model: str, range_val: float, sill: float,
     return cov
 
 
+def _experimental_variogram_from_grid(
+    grid_values: np.ndarray,
+    x_coords_m: np.ndarray,
+    y_coords_m: np.ndarray,
+    max_pairs: int = 4000,
+    n_bins: int = 18,
+) -> pd.DataFrame:
+    values = np.asarray(grid_values, dtype=float)
+    xv, yv = np.meshgrid(np.asarray(x_coords_m, dtype=float), np.asarray(y_coords_m, dtype=float))
+    pts = np.column_stack([xv.ravel(), yv.ravel(), values.ravel()])
+    pts = pts[np.isfinite(pts[:, 2])]
+    if len(pts) < 20:
+        return pd.DataFrame(columns=["lag", "gamma", "pairs"])
+
+    rng = np.random.default_rng(42)
+    sample_n = min(len(pts), 900)
+    idx = rng.choice(len(pts), size=sample_n, replace=False)
+    s = pts[idx]
+
+    i = rng.integers(0, sample_n, size=max_pairs)
+    j = rng.integers(0, sample_n, size=max_pairs)
+    mask = i != j
+    i = i[mask]
+    j = j[mask]
+    dx = s[i, 0] - s[j, 0]
+    dy = s[i, 1] - s[j, 1]
+    h = np.sqrt(dx * dx + dy * dy)
+    gamma = 0.5 * (s[i, 2] - s[j, 2]) ** 2
+
+    if len(h) == 0 or not np.isfinite(h).any():
+        return pd.DataFrame(columns=["lag", "gamma", "pairs"])
+
+    h_max = float(np.nanpercentile(h, 90))
+    h_max = max(h_max, 1.0)
+    bins = np.linspace(0.0, h_max, n_bins + 1)
+    out_rows: list[dict[str, float]] = []
+    for b0, b1 in zip(bins[:-1], bins[1:]):
+        m = (h >= b0) & (h < b1)
+        if int(np.sum(m)) < 8:
+            continue
+        out_rows.append({"lag": float(0.5 * (b0 + b1)), "gamma": float(np.nanmean(gamma[m])), "pairs": int(np.sum(m))})
+    return pd.DataFrame(out_rows)
+
+
 def _wells_covariance_dataframe() -> pd.DataFrame:
     x_w, y_w, _ = _well_arrays_internal()
     if x_w.size == 0:
@@ -693,6 +990,16 @@ def _wells_covariance_dataframe() -> pd.DataFrame:
 
 def _depth_step_m() -> float:
     return float(sld_c_inc.value) * _depth_unit_to_m()
+
+
+def _fallback_velocity_base_mps() -> float:
+    twt_vals = np.asarray(surface_state["twt"].values, dtype=float)
+    depth_vals = np.asarray(surface_state.get("depth_input", surface_state["twt"]).values, dtype=float)
+    safe_twt = np.where(np.abs(twt_vals) > 1e-6, twt_vals, np.nan)
+    vel_est = (depth_vals / safe_twt) * 2000.0
+    if np.isfinite(vel_est).any():
+        return float(np.clip(np.nanmedian(vel_est), 500.0, 8000.0))
+    return 3000.0
 
 
 def _volumetric_series(trap_stats: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -757,8 +1064,8 @@ def _recommend_velocity_std_from_surface() -> dict[str, float]:
     vel_ref = float(np.nanmean(np.asarray(surface_state["velocity"].values, dtype=float)))
     depth_relief = (twt_range * vel_ref) / 2000.0
 
-    target_depth_std = float(np.clip(0.20 * depth_relief, 0.25, 1.0))
-    suggested_vel_std = float(np.clip(target_depth_std * 2000.0 / abs_twt_median, 0.3, 1.2))
+    target_depth_std = float(np.clip(0.20 * depth_relief, 5.0, 120.0))
+    suggested_vel_std = float(np.clip(target_depth_std * 2000.0 / abs_twt_median, 5.0, 250.0))
     upper_reasonable_vel_std = MAX_VELOCITY_STD_FPS * 0.3048
 
     return {
@@ -776,16 +1083,18 @@ def _recommend_velocity_std_from_surface() -> dict[str, float]:
 
 def _apply_velocity_std_recommendation() -> None:
     rec = _recommend_velocity_std_from_surface()
+    if "sld_std_dev" not in globals():
+        return
     std_max_display = (MAX_VELOCITY_STD_FPS * 0.3048) / _velocity_unit_to_mps()
     sld_std_dev.end = round(std_max_display, 3)
     sld_std_dev.name = f"Velocity Std. Dev. ({rg_velocity_units.value})"
 
     suggested = rec["suggested_vel_std"]
     upper_reasonable = rec["upper_reasonable_vel_std"]
-    current_std_mps = float(sld_std_dev.value) * _velocity_unit_to_mps()
-
-    if sld_std_dev.value > sld_std_dev.end:
-        sld_std_dev.value = sld_std_dev.end
+    sill_value = float(sld_sill.value) if "sld_sill" in globals() else 1.0
+    model_factor = float(np.clip(np.sqrt(max(sill_value, 1e-6)), 0.35, 1.6))
+    auto_std_mps = float(np.clip(suggested * model_factor, 0.15, upper_reasonable))
+    sld_std_dev.value = min(auto_std_mps / _velocity_unit_to_mps(), sld_std_dev.end)
     current_std_mps = float(sld_std_dev.value) * _velocity_unit_to_mps()
 
     logger.info(
@@ -804,7 +1113,7 @@ def _apply_velocity_std_recommendation() -> None:
 
 
 def _run_test_mode_diagnostics(trigger: str) -> None:
-    if "--test" not in sys.argv:
+    if not TEST_MODE:
         return
 
     try:
@@ -831,7 +1140,7 @@ def _run_test_mode_diagnostics(trigger: str) -> None:
         )
 
         if finite_final_pct < 99.0 or final_range <= 0.0:
-            pn.state.notifications.warning(
+            _notify_warning(
                 "Test-mode diagnostic: Final depth map has low finite coverage or zero range. Check velocity std/smoothing settings.",
                 duration=5000,
             )
@@ -872,51 +1181,32 @@ def _trap_key(stack_key: tuple) -> tuple:
 
 
 def _apply_surface_generation(_event=None) -> None:
-    mode = sel_surface.value
-    if mode == "Imported Petrel Surface":
-        if IMPORTED_SURFACE_PARSED is None:
-            pn.state.notifications.warning("No imported Petrel surface found in launcher payload; using synthetic surface.", duration=3000)
-            mode = "Synthetic TWT Input"
-            twt_ms, vel = core_build_surfaces(
-                mode,
-                x_values,
-                y_values,
-                major_sigma=sld_elong_major.value,
-                minor_sigma=sld_elong_minor.value,
-                rotation_deg=sld_elong_rotation.value,
-                twt_base_ms=sld_twt_base.value,
-                twt_amp_ms=sld_twt_amp.value,
-                vel_base=sld_vel_base.value,
-                vel_amp=sld_vel_amp.value,
-            )
-            x_coords, y_coords = x_values, y_values
-        else:
-            x_coords, y_coords, imported_z = IMPORTED_SURFACE_PARSED
-            twt_ms = imported_z
-            vel = np.full_like(twt_ms, float(sld_vel_base.value), dtype=np.float32)
+    time_surface, depth_surface = _parse_imported_surfaces()
+    if time_surface is None:
+        _notify_warning("Time surface not found; update aborted.", duration=3500)
+        return
+
+    x_coords, y_coords, twt_ms = time_surface
+    if depth_surface is not None and len(depth_surface[0]) == len(x_coords) and len(depth_surface[1]) == len(y_coords):
+        depth_map_m = _normalize_imported_depth_to_m(depth_surface[2], twt_ms)
     else:
-        twt_ms, vel = core_build_surfaces(
-            mode,
-            x_values,
-            y_values,
-            major_sigma=sld_elong_major.value,
-            minor_sigma=sld_elong_minor.value,
-            rotation_deg=sld_elong_rotation.value,
-            twt_base_ms=sld_twt_base.value,
-            twt_amp_ms=sld_twt_amp.value,
-            vel_base=sld_vel_base.value,
-            vel_amp=sld_vel_amp.value,
-        )
-        x_coords, y_coords = x_values, y_values
+        depth_resampled = _resample_depth_to_time_grid(depth_surface, x_coords, y_coords)
+        depth_map_m = _normalize_imported_depth_to_m(depth_resampled, twt_ms) if depth_resampled is not None else (np.asarray(twt_ms, dtype=float) * _fallback_velocity_base_mps()) / 2000.0
+
+    safe_twt = np.where(np.abs(np.asarray(twt_ms, dtype=float)) > 1e-6, np.asarray(twt_ms, dtype=float), np.nan)
+    vel = np.where(np.isfinite(safe_twt), (np.asarray(depth_map_m, dtype=float) / safe_twt) * 2000.0, np.nan)
+    vel = np.nan_to_num(vel, nan=_fallback_velocity_base_mps())
+    vel = np.maximum(vel, 500.0).astype(np.float32)
 
     # Calculate dx, dy, and cell_area for imported or synthetic grid
     dx = float(np.mean(np.diff(x_coords))) if len(x_coords) > 1 else 1.0
     dy = float(np.mean(np.diff(y_coords))) if len(y_coords) > 1 else 1.0
     cell_area = dx * dy
 
-    surface_state["mode"] = mode
+    surface_state["mode"] = "Imported Time + Depth"
     surface_state["token"] = int(surface_state["token"]) + 1
-    surface_state["twt"] = xr.DataArray(twt_ms, coords=[y_coords, x_coords], dims=["y", "x"], name="TWT")
+    surface_state["twt"] = xr.DataArray(np.asarray(twt_ms, dtype=np.float32), coords=[y_coords, x_coords], dims=["y", "x"], name="TWT")
+    surface_state["depth_input"] = xr.DataArray(np.asarray(depth_map_m, dtype=np.float32), coords=[y_coords, x_coords], dims=["y", "x"], name="DepthInput")
     surface_state["velocity"] = xr.DataArray(vel, coords=[y_coords, x_coords], dims=["y", "x"], name="Velocity")
     surface_state["x_coords"] = x_coords
     surface_state["y_coords"] = y_coords
@@ -932,7 +1222,7 @@ def _apply_surface_generation(_event=None) -> None:
     x_min, x_max, y_min, y_max, _, _ = _surface_xy_bounds()
     logger.info(
         "Surface regenerated | mode=%s token=%s cell_area=%.2f x=[%.3f, %.3f] y=[%.3f, %.3f]",
-        mode,
+        surface_state["mode"],
         surface_state["token"],
         cell_area,
         x_min,
@@ -942,30 +1232,28 @@ def _apply_surface_generation(_event=None) -> None:
     )
 
     _run_test_mode_diagnostics("surface_generate")
-    _surface_mode_hint.object = ""
-    _surface_mode_hint.visible = False
 
 
 def _on_surface_mode_change(event) -> None:
-    is_elongated = event.new == "Elongated / Ellipsoidal"
-    for widget in [
-        sld_elong_major,
-        sld_elong_minor,
-        sld_elong_rotation,
-        sld_twt_base,
-        sld_twt_amp,
-        sld_vel_base,
-        sld_vel_amp,
-    ]:
-        widget.visible = is_elongated
-    _surface_mode_hint.object = "⚠️ Surface selection changed. Press **Generate / Update TWT Input** to load it."
-    _surface_mode_hint.visible = True
+    return
 
 
 def _on_depth_update_click(_event) -> None:
+    progress_monte_carlo.visible = True
+    _set_progress(2)
     surface_state["section_angle_applied"] = float(sld_section_angle.value)
     _invalidate_caches()
-    _set_progress(0)
+    try:
+        _, depth_stack, _, _ = get_velocity_and_depth_stacks()
+        _ = get_trap_stats(depth_stack)
+    except Exception:
+        logger.exception("Velocity/depth update failed")
+        _notify_error("Velocity/depth update failed. Check logs.", duration=5000)
+    finally:
+        _set_progress(100)
+        time.sleep(0.2)
+        progress_monte_carlo.visible = False
+        _set_progress(0)
     _trigger_refresh()
     _run_test_mode_diagnostics("depth_update")
 
@@ -1047,6 +1335,8 @@ def get_trap_stats(depth_stack: np.ndarray) -> dict[str, np.ndarray]:
 
 def _build_report_payload() -> dict[str, np.ndarray | pd.DataFrame | float]:
     _, depth_stack, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
+    selected_idx = min(max(int(sld_map_show.value) - 1, 0), depth_stack.shape[0] - 1)
+    selected_depth_map = np.asarray(depth_stack[selected_idx], dtype=float)
     trap_stats = get_trap_stats(depth_stack)
 
     arr_thick, arr_area, arr_grv, arr_stooip = _volumetric_series(trap_stats)
@@ -1079,6 +1369,8 @@ def _build_report_payload() -> dict[str, np.ndarray | pd.DataFrame | float]:
         "depth_stack": depth_stack,
         "avg_velocity_map": avg_velocity_map,
         "final_depth_map": final_depth_map,
+        "selected_idx": selected_idx,
+        "selected_depth_map": selected_depth_map,
         "trap_stats": trap_stats,
         "probability": probability,
         "arr_thick": arr_thick,
@@ -1111,6 +1403,8 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     depth_stack = payload["depth_stack"]
     avg_velocity_map = payload["avg_velocity_map"]
     final_depth_map = payload["final_depth_map"]
+    selected_idx = int(payload.get("selected_idx", 0))
+    selected_depth_map = np.asarray(payload.get("selected_depth_map", final_depth_map), dtype=float)
     probability = payload["probability"]
     arr_thick = payload["arr_thick"]
     arr_area = payload["arr_area"]
@@ -1137,7 +1431,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         ax_twt.scatter(well_x_m, well_y_m, c="yellow", edgecolors="black", s=36, zorder=8)
         for idx, (wx, wy) in enumerate(zip(well_x_m, well_y_m)):
             label = well_names[idx] if idx < len(well_names) else f"Well_{idx+1}"
-            ax_twt.annotate(label, (wx, wy), xytext=(6, 6), textcoords="offset points", color="yellow", fontsize=8, fontweight="bold")
+            ax_twt.annotate(label, (wx, wy), xytext=(10, 8), textcoords="offset points", color="yellow", fontsize=9, fontweight="bold")
     ax_twt.set_xlim(float(extent[0]), float(extent[1]))
     ax_twt.set_ylim(float(extent[2]), float(extent[3]))
     ax_twt.margins(x=0, y=0)
@@ -1160,8 +1454,8 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         ax_section.plot(section_x, row, color="red", alpha=0.2, linewidth=0.7)
     ax_section.plot(section_x, final_section, color="black", linewidth=2.2, label=f"Final Depth [{_depth_unit_label()}] from Mean AV")
     section_std = np.nanstd(section_stack, axis=0)
-    ax_section.plot(section_x, final_section + section_std, color="black", linestyle="--", linewidth=1.4, alpha=0.9, label="Std +1σ (dashed black)")
-    ax_section.plot(section_x, final_section - section_std, color="black", linestyle="--", linewidth=1.4, alpha=0.9, label="Std -1σ (dashed black)")
+    ax_section.plot(section_x, final_section + section_std, color="black", linestyle="--", linewidth=1.4, alpha=0.9, label="Std +1sigma (dashed black)")
+    ax_section.plot(section_x, final_section - section_std, color="black", linestyle="--", linewidth=1.4, alpha=0.9, label="Std -1sigma (dashed black)")
     deterministic_spill, _, _ = core_get_trap_and_spill(final_depth_map, _depth_step_m())
     ax_section.axhline(
         deterministic_spill,
@@ -1186,7 +1480,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
             ax_section.axvline(float(wx), color=MAGENTA_OMV_COLOR, linestyle="--", linewidth=1.5, alpha=0.9)
         for idx, (wd, wz) in enumerate(zip(well_dist, well_depth)):
             label = well_names[idx] if idx < len(well_names) else f"Well_{idx+1}"
-            ax_section.annotate(label, (wd, wz), xytext=(0, 9), textcoords="offset points", color=DARK_MAGENTA_OMV_COLOR, fontsize=8, fontweight="bold", ha="center")
+            ax_section.annotate(label, (wd, wz), xytext=(6, 4), textcoords="offset points", color=DARK_MAGENTA_OMV_COLOR, fontsize=9, fontweight="bold", ha="left")
     # Dynamically set Y-axis range for section based on section data
     section_min = float(np.nanmin(section_stack))
     section_max = float(np.nanmax(section_stack))
@@ -1196,7 +1490,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         ax_section.set_ylim(section_min - margin, section_max + margin)
     else:
         ax_section.set_ylim(section_max + margin, section_min - margin)
-    ax_section.set_title(f"Structural Section (Perpendicular, Angle={sld_section_angle.value}°)", fontsize=10, fontweight="bold")
+    ax_section.set_title(f"Structural Section (Perpendicular, Angle={sld_section_angle.value}degree)", fontsize=10, fontweight="bold")
     ax_section.set_xlabel("Section Samples")
     ax_section.set_ylabel("Depth (m)")
     ax_section.yaxis.labelpad = 2
@@ -1212,24 +1506,24 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     _plot_hist_with_lines(fig.add_subplot(hist_gs[3, 0]), arr_stooip, "STOOIP Dist.", "STOOIP (MMbbls)", "#ffaa00")
 
     ax_depth = fig.add_subplot(gs[1, 0])
-    depth_img = ax_depth.imshow(final_depth_map, origin="lower", extent=extent, cmap=sel_cmap.value, aspect="auto")
+    depth_img = ax_depth.imshow(selected_depth_map, origin="lower", extent=extent, cmap=sel_cmap.value, aspect="auto")
     ax_depth.plot(xs_line, ys_line, color="red", linestyle="--", linewidth=1.4)
     if well_x_m.size > 0:
         ax_depth.scatter(well_x_m, well_y_m, c="yellow", edgecolors="black", s=36, zorder=8)
         for idx, (wx, wy) in enumerate(zip(well_x_m, well_y_m)):
             label = well_names[idx] if idx < len(well_names) else f"Well_{idx+1}"
-            ax_depth.annotate(label, (wx, wy), xytext=(6, 6), textcoords="offset points", color="yellow", fontsize=8, fontweight="bold")
+            ax_depth.annotate(label, (wx, wy), xytext=(10, 8), textcoords="offset points", color="yellow", fontsize=9, fontweight="bold")
     if chk_depth_contour.value:
         contour_interval_m = max(float(sld_depth_contours.value) * _depth_unit_to_m(), 0.1)
-        depth_min = float(np.nanmin(final_depth_map))
-        depth_max = float(np.nanmax(final_depth_map))
+        depth_min = float(np.nanmin(selected_depth_map))
+        depth_max = float(np.nanmax(selected_depth_map))
         if depth_max > depth_min:
             levels = np.arange(depth_min, depth_max, contour_interval_m)
             if len(levels) > 0:
-                ax_depth.contour(x_coords, y_coords, final_depth_map, levels=levels, colors="white", linewidths=0.6, alpha=0.75)
+                ax_depth.contour(x_coords, y_coords, selected_depth_map, levels=levels, colors="white", linewidths=0.6, alpha=0.75)
 
     try:
-        ax_depth.contour(x_coords, y_coords, final_depth_map, levels=[deterministic_spill], colors="red", linestyles="--", linewidths=1.8)
+        ax_depth.contour(x_coords, y_coords, selected_depth_map, levels=[deterministic_spill], colors="red", linestyles="--", linewidths=1.8)
     except Exception:
         logger.warning("PDF depth spill contour skipped due to contour level/data mismatch")
 
@@ -1237,7 +1531,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
     ax_depth.set_ylim(float(extent[2]), float(extent[3]))
     ax_depth.margins(x=0, y=0)
     ax_depth.set_aspect("auto")
-    ax_depth.set_title("Final Depth Map = (TWT ms × AV)/2000", fontsize=10, fontweight="bold")
+    ax_depth.set_title(f"Selected Depth Realization #{selected_idx + 1}", fontsize=10, fontweight="bold")
     ax_depth.set_xlabel("x")
     ax_depth.set_ylabel("y")
     cb_depth = fig.colorbar(depth_img, ax=ax_depth, fraction=0.046, pad=0.02)
@@ -1250,7 +1544,7 @@ def _build_dashboard_figure(report_title: str, payload: dict) -> plt.Figure:
         ax_prob.scatter(well_x_m, well_y_m, c="yellow", edgecolors="black", s=36, zorder=8)
         for idx, (wx, wy) in enumerate(zip(well_x_m, well_y_m)):
             label = well_names[idx] if idx < len(well_names) else f"Well_{idx+1}"
-            ax_prob.annotate(label, (wx, wy), xytext=(6, 6), textcoords="offset points", color="yellow", fontsize=8, fontweight="bold")
+            ax_prob.annotate(label, (wx, wy), xytext=(10, 8), textcoords="offset points", color="yellow", fontsize=9, fontweight="bold")
     ax_prob.set_xlim(float(extent[0]), float(extent[1]))
     ax_prob.set_ylim(float(extent[2]), float(extent[3]))
     ax_prob.margins(x=0, y=0)
@@ -1281,14 +1575,14 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
             cov_offdiag_mean = float(np.nanmean(tri))
 
     lines = [
-        f"{report_title} — Parameters and Configuration",
+        f"{report_title} - Parameters and Configuration",
         "",
         "Input & Realizations",
         f"- Surface: {sel_surface.value}",
         f"- Number of realizations: {sld_n_maps.value}",
         f"- Velocity Std. Dev. ({rg_velocity_units.value}): {sld_std_dev.value}",
         f"- Smoothing sigma: {sld_smooth.value}",
-        f"- Section/Cut angle (°): {sld_section_angle.value}",
+        f"- Section/Cut angle (degree): {sld_section_angle.value}",
         f"- Torch acceleration enabled: {chk_torch_accel.value}",
         f"- Contour step (spill search, {_depth_unit_label()}): {sld_c_inc.value}",
         "",
@@ -1333,23 +1627,27 @@ def _build_pdf_parameters_page(report_title: str) -> plt.Figure:
 # ==============================================================================
 #  UI WIDGETS
 # ==============================================================================
-_default_surface_mode = "Imported Petrel Surface" if ("--test" in sys.argv and IMPORTED_SURFACE_PARSED is not None) else "Synthetic TWT Input"
+_default_surface_mode = "Imported Time + Depth"
 _surface_mode_hint = pn.pane.Markdown(
     "",
     visible=False,
 )
 
-sel_surface = pn.widgets.Select(
-    name="Select Surface",
-    options=["Synthetic TWT Input", "Elongated / Ellipsoidal", "Imported Petrel Surface"],
-    value=_default_surface_mode,
-    stylesheets=select_stylesheets,
+txt_input_time_surface = pn.pane.Markdown(
+    f"**Time Surface:** {TEST_SURFACE_TIME_FILE if TEST_MODE else 'Imported from payload'}",
+    sizing_mode="stretch_width",
 )
+txt_input_depth_surface = pn.pane.Markdown(
+    f"**Depth Surface:** {TEST_SURFACE_DEPTH_FILE if TEST_MODE else 'Imported from payload'}",
+    sizing_mode="stretch_width",
+)
+
+sel_surface = pn.widgets.Select(name="Select Surface", options=["Imported Time + Depth"], value=_default_surface_mode, stylesheets=select_stylesheets, visible=False)
 sld_elong_major = pn.widgets.FloatSlider(
     name="Elongated Major Axis Sigma (m)",
     start=500,
-    end=5000,
-    value=2800,
+    end=16000,
+    value=9186,
     step=100,
     visible=False,
     stylesheets=slider_stylesheets,
@@ -1357,14 +1655,14 @@ sld_elong_major = pn.widgets.FloatSlider(
 sld_elong_minor = pn.widgets.FloatSlider(
     name="Elongated Minor Axis Sigma (m)",
     start=300,
-    end=3000,
-    value=1200,
+    end=9000,
+    value=3937,
     step=50,
     visible=False,
     stylesheets=slider_stylesheets,
 )
 sld_elong_rotation = pn.widgets.FloatSlider(
-    name="Elongated Azimuth (°)",
+    name="Elongated Azimuth (degree)",
     start=0,
     end=180,
     value=25,
@@ -1391,19 +1689,19 @@ sld_twt_amp = pn.widgets.FloatSlider(
     stylesheets=slider_stylesheets,
 )
 sld_vel_base = pn.widgets.FloatSlider(
-    name="Velocity Base (m/s)",
-    start=2200,
-    end=4200,
-    value=3000,
-    step=10,
+    name="Velocity Base (ft/s)",
+    start=7000,
+    end=14000,
+    value=9843,
+    step=25,
     visible=False,
     stylesheets=slider_stylesheets,
 )
 sld_vel_amp = pn.widgets.FloatSlider(
-    name="Velocity Dome Amplitude (m/s)",
+    name="Velocity Dome Amplitude (ft/s)",
     start=0,
-    end=500,
-    value=120,
+    end=1640,
+    value=394,
     step=5,
     visible=False,
     stylesheets=slider_stylesheets,
@@ -1415,6 +1713,14 @@ sld_contours = pn.widgets.IntSlider(
     value=20,
     stylesheets=slider_stylesheets,
 )
+sld_input_depth_contours = pn.widgets.FloatSlider(
+    name="Depth Contour Range Number (ft)",
+    start=10,
+    end=1000,
+    value=100,
+    step=10,
+    stylesheets=slider_stylesheets,
+)
 sel_cmap = pn.widgets.Select(
     name="Colormap",
     options=["viridis", "plasma", "terrain", "rainbow"],
@@ -1422,7 +1728,7 @@ sel_cmap = pn.widgets.Select(
     stylesheets=select_stylesheets,
 )
 btn_generate_surf = pn.widgets.Button(
-    name="Generate / Update TWT Input",
+    name="Update TWT/Depth Inputs",
     css_classes=["omv-run-btn"],
     stylesheets=get_neon_button_stylesheets(),
     sizing_mode="stretch_width",
@@ -1507,7 +1813,7 @@ sld_c_inc = pn.widgets.FloatSlider(
     name="Contour Search Step (ft)",
     start=1,
     end=20,
-    value=5,
+    value=20,
     stylesheets=slider_stylesheets,
 )
 chk_eliminate = pn.widgets.Checkbox(name="Eliminate outside closure", value=False)
@@ -1515,9 +1821,9 @@ chk_close_poly = pn.widgets.Checkbox(name="Show closure contour (red)", value=Tr
 chk_depth_contour = pn.widgets.Checkbox(name="Contour Final Depth Map", value=True)
 sld_depth_contours = pn.widgets.FloatSlider(
     name="Contours Range Number (ft)",
-    start=1,
-    end=50,
-    value=5,
+    start=0,
+    end=200,
+    value=100,
     step=1,
     stylesheets=slider_stylesheets,
 )
@@ -1540,13 +1846,14 @@ sld_std_dev = pn.widgets.FloatSlider(
     start=0.0,
     end=50.0,
     value=3.937,
+    visible=False,
     stylesheets=slider_stylesheets,
 )
 sld_smooth = pn.widgets.FloatSlider(
     name="Smoothing (Sigma)",
     start=0.0,
-    end=10.0,
-    value=2.0,
+    end=25.0,
+    value=10.0,
     step=0.5,
     stylesheets=slider_stylesheets,
 )
@@ -1566,7 +1873,7 @@ sld_map_show = pn.widgets.IntSlider(
     stylesheets=slider_stylesheets,
 )
 sld_section_angle = pn.widgets.FloatSlider(
-    name="Section/Cut Angle (°)",
+    name="Section/Cut Angle (degree)",
     start=0,
     end=360,
     value=0,
@@ -1586,6 +1893,7 @@ progress_monte_carlo = pn.widgets.Progress(
     max=100,
     bar_color="primary",
     sizing_mode="stretch_width",
+    visible=False,
 )
 
 rg_velocity_units = pn.widgets.RadioButtonGroup(
@@ -1599,7 +1907,7 @@ rg_velocity_units = pn.widgets.RadioButtonGroup(
 rg_xy_units = pn.widgets.RadioButtonGroup(
     name="",
     options=["meters", "feet"],
-    value="meters",
+    value="feet",
     button_type="default",
     stylesheets=radio_group_stylesheets,
     width=160,
@@ -1656,6 +1964,9 @@ def _general_setting_row(label: str, widget) -> pn.Row:
 _sync_section_y_range()
 _refresh_unit_labels()
 
+for _w in [sld_elong_major, sld_elong_minor, sld_elong_rotation, sld_twt_base, sld_twt_amp, sld_vel_amp]:
+    _w.visible = bool(sel_surface.value == "Elongated / Ellipsoidal")
+
 
 @pn.depends(sld_n_maps, watch=True)
 def _update_map_slider(n_maps_val: int) -> None:
@@ -1667,7 +1978,7 @@ def _update_map_slider(n_maps_val: int) -> None:
 sld_range = pn.widgets.FloatSlider(
     name="Range (m)",
     start=500,
-    end=5000,
+    end=10000,
     value=DEFAULT_RANGE_M,
     stylesheets=slider_stylesheets,
 )
@@ -1707,7 +2018,7 @@ sld_ntg = pn.widgets.FloatSlider(
     stylesheets=slider_stylesheets,
 )
 sld_poro = pn.widgets.FloatSlider(
-    name="Porosity (Φ)",
+    name="Porosity (phi)",
     start=0.01,
     end=0.4,
     value=0.2,
@@ -1753,11 +2064,10 @@ btn_update_volumetrics = pn.widgets.Button(
     sizing_mode="stretch_width",
 )
 
-sel_surface.param.watch(_on_surface_mode_change, "value")
 rg_velocity_units.param.watch(_on_velocity_units_change, "value")
 rg_depth_units.param.watch(_on_depth_units_change, "value")
 rg_xy_units.param.watch(_on_xy_units_change, "value")
-rg_time_units.param.watch(_on_generic_units_change, "value")
+rg_time_units.param.watch(_on_time_units_change, "value")
 rg_area_units.param.watch(_on_generic_units_change, "value")
 rg_volume_units.param.watch(_on_generic_units_change, "value")
 chk_depth_contour.param.watch(_on_depth_contour_toggle, "value")
@@ -1768,26 +2078,20 @@ btn_update_culm.on_click(_on_depth_update_click)
 btn_update_volumetrics.on_click(_on_depth_update_click)
 btn_apply_general_settings.on_click(_apply_general_settings)
 chk_show_wells.param.watch(
-    lambda _event: pn.state.notifications.info("Press 'Update Well Location' to apply well visibility changes.", duration=2800),
+    lambda _event: _notify_info("Press 'Update Well Location' to apply well visibility changes.", duration=2800),
     "value",
 )
 chk_use_wells.param.watch(
-    lambda _event: pn.state.notifications.info("Press 'Update Well Location' to apply well-anchor conditioning changes.", duration=2800),
+    lambda _event: _notify_info("Press 'Update Well Location' to apply well-anchor conditioning changes.", duration=2800),
     "value",
 )
 
 txt_report_header = pn.widgets.TextInput(name="Plot Header", value="Structural Uncertainty Evaluation")
 txt_report_filename = pn.widgets.TextInput(name="File Name", value="structural_uncertainty_report")
 txt_report_location = pn.widgets.TextInput(name="Location", value=str(APP_DIR / "reports"))
-sel_report_type = pn.widgets.Select(name="Type", options=[".png", ".jpeg", ".pdf"], value=".pdf", stylesheets=select_stylesheets)
+sel_report_type = pn.widgets.Select(name="Type", options=[".png", ".jpeg", ".pdf", ".xlsx"], value=".pdf", stylesheets=select_stylesheets)
 btn_export_report = pn.widgets.Button(
     name="Generate Report",
-    css_classes=["omv-run-btn"],
-    stylesheets=get_neon_button_stylesheets(),
-    sizing_mode="stretch_width",
-)
-btn_export_qc_excel = pn.widgets.Button(
-    name="Export QC Excel",
     css_classes=["omv-run-btn"],
     stylesheets=get_neon_button_stylesheets(),
     sizing_mode="stretch_width",
@@ -1830,17 +2134,26 @@ def _set_petrel_export_status(message: str) -> None:
 # ==============================================================================
 #  PLOTTING FUNCTIONS
 # ==============================================================================
-@pn.depends(btn_generate_surf, btn_update_depth_maps, refresh_token, wells_refresh_token, chk_show_wells, rg_xy_units, rg_time_units)
+@pn.depends(
+    btn_generate_surf,
+    btn_update_depth_maps,
+    refresh_token,
+    wells_refresh_token,
+)
 def plot_top_left_input_twt_map(*_args):
     logger.debug("Rendering input TWT map")
+    global input_surface_tabs
 
     da = surface_state["twt"].copy()
+    depth_input_da = surface_state.get("depth_input")
+    if depth_input_da is None:
+        depth_input_da = xr.DataArray((np.asarray(da.values, dtype=float) * np.asarray(surface_state["velocity"].values, dtype=float)) / 2000.0, coords=da.coords, dims=da.dims)
     x_min, x_max, y_min, y_max, x_coords_m, y_coords_m = _surface_xy_bounds()
     x_coords = _xy_from_m(x_coords_m)
     y_coords = _xy_from_m(y_coords_m)
     twt_display = _time_from_ms(da.values)
-    twt_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"TWT ({_time_unit_label()})", "@image{0,0.00}")])
-    base_plot = hv.Image((x_coords, y_coords, twt_display), kdims=["x", "y"], vdims=["TWT"]).opts(
+    twt_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"TWT ({_time_unit_label()})", "@{TWT}{0,0.00}")])
+    base_plot = hv.QuadMesh((x_coords, y_coords, twt_display), kdims=["x", "y"], vdims=["TWT"]).opts(
         cmap=sel_cmap.value,
         title=f"Input Deterministic TWT Map ({_time_unit_label()})",
         colorbar=True,
@@ -1850,12 +2163,11 @@ def plot_top_left_input_twt_map(*_args):
     da_display = xr.DataArray(twt_display, coords=[y_coords, x_coords], dims=["y", "x"], name="TWT")
     contours = da_display.hvplot.contour(levels=sld_contours.value, color="black", alpha=0.5)
     angle_deg = _applied_section_angle()
-    xs_line_m, ys_line_m = core_line_through_center(da.x.values, da.y.values, angle_deg)
-    xs_line, ys_line = _xy_from_m(xs_line_m), _xy_from_m(ys_line_m)
+    xs_line, ys_line = _section_line_display_coords(angle_deg)
     cross_section = hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
-    overlay = base_plot * contours * cross_section
+    overlay_time = base_plot * contours * cross_section
+    wells_df = _well_overlay_dataframe() if chk_show_wells.value else pd.DataFrame()
     if chk_show_wells.value:
-        wells_df = _well_overlay_dataframe()
         if not wells_df.empty:
             well_hover = HoverTool(tooltips=[("Well", "@well_name"), ("X", "@x{0,0.00}"), ("Y", "@y{0,0.00}")])
             well_pts = hv.Points(wells_df, kdims=["x", "y"], vdims=["well_name", "velocity"]).opts(
@@ -1866,28 +2178,96 @@ def plot_top_left_input_twt_map(*_args):
                 tools=[well_hover],
             )
             well_labels = hv.Labels(wells_df, kdims=["x", "y"], vdims=["well_name"]).opts(
-                text_font_size="8pt",
+                text_font_size="9pt",
                 text_color="yellow",
                 text_align="left",
-                xoffset=8,
-                yoffset=6,
+                xoffset=10,
+                yoffset=8,
             )
-            overlay = overlay * well_pts * well_labels
+            overlay_time = overlay_time * well_pts * well_labels
 
-    return overlay.opts(
-        toolbar="above",
-        aspect=None,
-        data_aspect=None,
-        xlim=(float(np.min(x_coords)), float(np.max(x_coords))),
-        ylim=(float(np.min(y_coords)), float(np.max(y_coords))),
-        xlabel=f"x ({_xy_unit_label()})",
-        ylabel=f"y ({_xy_unit_label()})",
-        shared_axes=False,
-        framewise=True,
+    depth_display = _depth_from_m(np.asarray(depth_input_da.values, dtype=float))
+    depth_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"Depth ({_depth_unit_label()})", "@{Depth}{0,0.00}")])
+    depth_plot = hv.QuadMesh((x_coords, y_coords, depth_display), kdims=["x", "y"], vdims=["Depth"]).opts(
+        cmap=sel_cmap.value,
+        title=f"Input Deterministic Depth Map ({_depth_unit_label()})",
+        colorbar=True,
+        colorbar_opts={"title": f"Depth [{_depth_unit_label()}]"},
+        tools=[depth_hover],
+    )
+    depth_da_display = xr.DataArray(depth_display, coords=[y_coords, x_coords], dims=["y", "x"], name="DepthInput")
+    depth_step = max(float(sld_input_depth_contours.value), 0.5)
+    dmin = float(np.nanmin(depth_display))
+    dmax = float(np.nanmax(depth_display))
+    depth_levels = np.arange(dmin, dmax + depth_step, depth_step) if dmax > dmin else np.array([])
+    depth_contours = depth_da_display.hvplot.contour(levels=list(depth_levels), color="white", alpha=0.7) if len(depth_levels) > 0 else hv.Curve([])
+    overlay_depth = depth_plot * depth_contours * cross_section
+
+    if chk_show_wells.value:
+        if not wells_df.empty:
+            well_hover = HoverTool(tooltips=[("Well", "@well_name"), ("X", "@x{0,0.00}"), ("Y", "@y{0,0.00}")])
+            well_pts = hv.Points(wells_df, kdims=["x", "y"], vdims=["well_name", "velocity"]).opts(
+                color="yellow",
+                size=9,
+                marker="circle",
+                line_color="black",
+                tools=[well_hover],
+            )
+            well_labels = hv.Labels(wells_df, kdims=["x", "y"], vdims=["well_name"]).opts(
+                text_font_size="9pt",
+                text_color="yellow",
+                text_align="left",
+                xoffset=10,
+                yoffset=8,
+            )
+            overlay_depth = overlay_depth * well_pts * well_labels
+
+    time_panel = pn.panel(
+        overlay_time.opts(
+            toolbar="above",
+            aspect=None,
+            data_aspect=None,
+            xlim=(float(np.min(x_coords)), float(np.max(x_coords))),
+            ylim=(float(np.min(y_coords)), float(np.max(y_coords))),
+            xlabel=f"x ({_xy_unit_label()})",
+            ylabel=f"y ({_xy_unit_label()})",
+            shared_axes=False,
+            framewise=True,
+        ),
+        sizing_mode="stretch_both",
+    )
+    depth_panel = pn.panel(
+        overlay_depth.opts(
+            toolbar="above",
+            aspect=None,
+            data_aspect=None,
+            xlim=(float(np.min(x_coords)), float(np.max(x_coords))),
+            ylim=(float(np.min(y_coords)), float(np.max(y_coords))),
+            xlabel=f"x ({_xy_unit_label()})",
+            ylabel=f"y ({_xy_unit_label()})",
+            shared_axes=False,
+            framewise=True,
+        ),
+        sizing_mode="stretch_both",
     )
 
+    if input_surface_tabs is None:
+        input_surface_tabs = pn.Tabs(("Input Time Surface", time_panel), ("Input Depth Surface", depth_panel), dynamic=False, tabs_location="above", sizing_mode="stretch_both")
+    else:
+        active = input_surface_tabs.active
+        input_surface_tabs[:] = [("Input Time Surface", time_panel), ("Input Depth Surface", depth_panel)]
+        input_surface_tabs.active = min(active, 1)
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, refresh_token, wells_refresh_token, chk_show_wells, rg_depth_units, rg_xy_units)
+    return input_surface_tabs
+
+
+@pn.depends(
+    btn_update_depth_maps,
+    btn_update_culm,
+    btn_update_vario,
+    refresh_token,
+    wells_refresh_token,
+)
 def plot_top_right_section(*_args):
     logger.debug("Rendering structural section with stochastic depth realizations")
 
@@ -1917,13 +2297,13 @@ def plot_top_right_section(*_args):
         (x_coords, final_section + section_std),
         kdims=["Distance_x"],
         vdims=["Depth_Z"],
-        label="Std +1σ (dashed black)",
+        label="Std +1sigma (dashed black)",
     ).opts(color="black", line_dash="dashed", line_width=1.5, alpha=0.9)
     lower_std_curve = hv.Curve(
         (x_coords, final_section - section_std),
         kdims=["Distance_x"],
         vdims=["Depth_Z"],
-        label="Std -1σ (dashed black)",
+        label="Std -1sigma (dashed black)",
     ).opts(color="black", line_dash="dashed", line_width=1.5, alpha=0.9)
 
     selected_idx = min(max(sld_map_show.value - 1, 0), section_stack.shape[0] - 1)
@@ -2018,11 +2398,11 @@ def plot_top_right_section(*_args):
                 tools=[section_hover],
             )
             section_overlay = section_overlay * hv.Labels(section_wells, kdims=["Distance", "Depth"], vdims=["well_name"]).opts(
-                text_font_size="8pt",
+                text_font_size="9pt",
                 text_color=DARK_MAGENTA_OMV_COLOR,
-                text_align="center",
-                xoffset=0,
-                yoffset=10,
+                text_align="left",
+                xoffset=6,
+                yoffset=4,
             )
 
             for idx, well_x in enumerate(distance_vals):
@@ -2037,7 +2417,7 @@ def plot_top_right_section(*_args):
     section_overlay = section_overlay * upper_std_curve * lower_std_curve
     return section_overlay.opts(
         toolbar="above",
-        title=f"Structural Section (Perpendicular, Angle={angle_deg:.0f}°)",
+        title=f"Structural Section (Perpendicular, Angle={angle_deg:.0f}degree)",
         ylim=ylim_value,
         xlabel=f"Distance along section ({_xy_unit_label()})",
         ylabel=f"Depth ({_depth_unit_label()})",
@@ -2047,13 +2427,20 @@ def plot_top_right_section(*_args):
     )
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, refresh_token, wells_refresh_token, chk_show_wells, rg_velocity_units, rg_depth_units, rg_xy_units)
+@pn.depends(
+    btn_update_depth_maps,
+    btn_update_culm,
+    btn_update_vario,
+    refresh_token,
+    wells_refresh_token,
+)
 def plot_bottom_left_final_depth_from_av(*_args):
     global av_depth_tabs
-    logger.debug("Rendering average velocity map and final depth map")
+    logger.debug("Rendering average velocity map and selected realization map")
 
     angle_deg = _applied_section_angle()
-    _, _, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
+    velocity_stack, depth_stack, avg_velocity_map, final_depth_map = get_velocity_and_depth_stacks()
+    selected_idx = min(max(sld_map_show.value - 1, 0), velocity_stack.shape[0] - 1)
 
     base_twt = surface_state["twt"]
     x_min, x_max, y_min, y_max, x_coords_m, y_coords_m = _surface_xy_bounds()
@@ -2065,14 +2452,18 @@ def plot_bottom_left_final_depth_from_av(*_args):
     if not np.isfinite(depth_arr).any():
         fallback_depth = (np.asarray(base_twt.values, dtype=float) * np.asarray(avg_velocity_map, dtype=float)) / 2000.0
         depth_arr = fallback_depth
-        pn.state.notifications.warning("Final depth map had no finite values; fallback depth map was used.", duration=4000)
+        _notify_warning("Final depth map had no finite values; fallback depth map was used.", duration=4000)
     depth_display = _depth_from_m(depth_arr)
     depth_da = xr.DataArray(depth_display, coords=base_twt.coords, dims=base_twt.dims, name="Depth")
+    depth_contour_da = xr.DataArray(depth_display, coords=[y_coords, x_coords], dims=["y", "x"], name="DepthDisp")
 
-    av_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"AV ({rg_velocity_units.value})", "@image{0,0.00}")])
-    depth_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"Depth ({_depth_unit_label()})", "@image{0,0.00}")])
-    av_plot = hv.Image((x_coords, y_coords, av_da.values), kdims=["x", "y"], vdims=["AV"]).opts(
+    av_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"AV ({rg_velocity_units.value})", "@{AV}{0,0.00}")])
+    real_hover = HoverTool(tooltips=[("X", "$x{0,0.00}"), ("Y", "$y{0,0.00}"), (f"Depth ({_depth_unit_label()})", "@{DepthReal}{0,0.00}")])
+    av_plot = hv.QuadMesh((x_coords, y_coords, av_da.values), kdims=["x", "y"], vdims=["AV"]).opts(
         cmap="viridis",
+        line_color=None,
+        line_alpha=0.0,
+        show_grid=False,
         colorbar=True,
         colorbar_opts={"title": f"Velocity [{rg_velocity_units.value}]"},
         title=f"Average Velocity Map (AV, {rg_velocity_units.value})",
@@ -2087,11 +2478,17 @@ def plot_bottom_left_final_depth_from_av(*_args):
         shared_axes=False,
         framewise=True,
     )
-    depth_plot = hv.Image((x_coords, y_coords, depth_da.values), kdims=["x", "y"], vdims=["Depth"]).opts(
+    selected_depth_arr = np.asarray(depth_stack[selected_idx], dtype=float)
+    selected_depth_display = _depth_from_m(selected_depth_arr)
+    selected_depth_da_display = xr.DataArray(selected_depth_display, coords=[y_coords, x_coords], dims=["y", "x"], name="DepthReal")
+    realization_plot = hv.QuadMesh((x_coords, y_coords, selected_depth_display), kdims=["x", "y"], vdims=["DepthReal"]).opts(
         cmap=sel_cmap.value,
+        line_color=None,
+        line_alpha=0.0,
+        show_grid=False,
         colorbar=True,
         colorbar_opts={"title": f"Depth [{_depth_unit_label()}]"},
-        title=f"Final Depth Map ({_depth_unit_label()})",
+        title=f"Depth Realization #{selected_idx + 1} ({_depth_unit_label()})",
         aspect=None,
         data_aspect=None,
         toolbar="above",
@@ -2099,14 +2496,13 @@ def plot_bottom_left_final_depth_from_av(*_args):
         ylim=(float(np.min(y_coords)), float(np.max(y_coords))),
         xlabel=f"x ({_xy_unit_label()})",
         ylabel=f"y ({_xy_unit_label()})",
-        tools=[depth_hover],
+        tools=[real_hover],
         shared_axes=False,
         framewise=True,
     )
-    xs_line_m, ys_line_m = core_line_through_center(base_twt.x.values, base_twt.y.values, angle_deg)
-    xs_line, ys_line = _xy_from_m(xs_line_m), _xy_from_m(ys_line_m)
+    xs_line, ys_line = _section_line_display_coords(angle_deg)
     av_overlay = av_plot * hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
-    overlay = depth_plot * hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
+    overlay = realization_plot * hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
 
     if chk_show_wells.value:
         wells_df = _well_overlay_dataframe()
@@ -2120,11 +2516,11 @@ def plot_bottom_left_final_depth_from_av(*_args):
                 tools=[well_hover],
             )
             well_labels = hv.Labels(wells_df, kdims=["x", "y"], vdims=["well_name"]).opts(
-                text_font_size="8pt",
+                text_font_size="9pt",
                 text_color="yellow",
                 text_align="left",
-                xoffset=8,
-                yoffset=6,
+                xoffset=10,
+                yoffset=8,
             )
             av_overlay = av_overlay * well_pts * well_labels
             overlay = overlay * well_pts * well_labels
@@ -2134,28 +2530,14 @@ def plot_bottom_left_final_depth_from_av(*_args):
 
     if chk_eliminate.value:
         if np.any(deterministic_mask):
-            masked_vals = np.where(deterministic_mask, depth_da.values, np.nan)
-            masked_plot = hv.Image((x_coords, y_coords, masked_vals), kdims=["x", "y"], vdims=["Depth"]).opts(
-                cmap=sel_cmap.value,
-                colorbar=True,
-                title="Final Depth Map (Isolated Closure)",
-                aspect=None,
-                data_aspect=None,
-                toolbar="above",
-                xlim=(float(np.min(x_coords)), float(np.max(x_coords))),
-                ylim=(float(np.min(y_coords)), float(np.max(y_coords))),
-                shared_axes=False,
-                framewise=True,
-            )
-            overlay = masked_plot * hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed")
+            pass
         else:
-            pn.state.notifications.warning("No closure mask found for current settings; showing unmasked final depth map.", duration=3500)
+            _notify_warning("No closure mask found for current settings; showing unmasked final depth map.", duration=3500)
 
     if chk_close_poly.value:
         try:
-            red_contour = depth_da.hvplot.contour(levels=[deterministic_spill], cmap=["red"]).opts(line_width=3, line_dash="dashed")
+            red_contour = depth_contour_da.hvplot.contour(levels=[deterministic_spill], cmap=["red"]).opts(line_width=3, line_dash="dashed")
             av_overlay = av_overlay * red_contour
-            overlay = overlay * red_contour
         except Exception:
             logger.warning("Final depth contour rendering skipped due to contour level/data mismatch")
 
@@ -2165,11 +2547,17 @@ def plot_bottom_left_final_depth_from_av(*_args):
             vmin = float(np.nanmin(depth_da.values))
             vmax = float(np.nanmax(depth_da.values))
             if vmax > vmin:
-                levels = np.arange(vmin, vmax, step_val)
+                levels = np.arange(vmin, vmax + step_val, step_val)
                 if len(levels) > 0:
-                    white_contours = depth_da.hvplot.contour(levels=list(levels), color="white", line_width=1, alpha=0.8)
+                    white_contours = depth_contour_da.hvplot.contour(levels=list(levels), color="white", line_width=1, alpha=0.8)
                     av_overlay = av_overlay * white_contours
-                    overlay = overlay * white_contours
+            rvmin = float(np.nanmin(selected_depth_da_display.values))
+            rvmax = float(np.nanmax(selected_depth_da_display.values))
+            if rvmax > rvmin:
+                rlevels = np.arange(rvmin, rvmax + step_val, step_val)
+                if len(rlevels) > 0:
+                    r_contours = selected_depth_da_display.hvplot.contour(levels=list(rlevels), color="white", line_width=1, alpha=0.8)
+                    overlay = overlay * r_contours
         except Exception:
             logger.warning("Final depth white contour rendering skipped")
 
@@ -2199,14 +2587,14 @@ def plot_bottom_left_final_depth_from_av(*_args):
     if av_depth_tabs is None:
         av_depth_tabs = pn.Tabs(
             ("Average Velocity Map", average_panel),
-            ("Final Depth", final_panel),
+            ("Selected Depth Realization", final_panel),
             dynamic=False,
             tabs_location="above",
             sizing_mode="stretch_both",
         )
     else:
         current_active = av_depth_tabs.active
-        av_depth_tabs[:] = [("Average Velocity Map", average_panel), ("Final Depth", final_panel)]
+        av_depth_tabs[:] = [("Average Velocity Map", average_panel), ("Selected Depth Realization", final_panel)]
         av_depth_tabs.active = min(current_active, 1)
 
     return av_depth_tabs
@@ -2214,7 +2602,21 @@ def plot_bottom_left_final_depth_from_av(*_args):
 
 @pn.depends(btn_update_vario, refresh_token, wells_refresh_token)
 def plot_bottom_left_variogram(*_args):
-    h = np.linspace(0, 5000, 200)
+    velocity_stack, _, _, _ = get_velocity_and_depth_stacks()
+    selected_idx = min(max(sld_map_show.value - 1, 0), velocity_stack.shape[0] - 1)
+    selected_map = np.asarray(velocity_stack[selected_idx], dtype=float)
+    selected_centered = selected_map - float(np.nanmean(selected_map))
+    raw_residual_std = float(np.nanstd(selected_centered))
+    raw_residual_var = float(np.nanvar(selected_centered))
+    if raw_residual_std > 0:
+        selected_map_for_vario = selected_centered / raw_residual_std
+    else:
+        selected_map_for_vario = selected_centered
+    x_coords_m = np.asarray(surface_state.get("x_coords", surface_state["twt"].x.values), dtype=float)
+    y_coords_m = np.asarray(surface_state.get("y_coords", surface_state["twt"].y.values), dtype=float)
+
+    empirical_df = _experimental_variogram_from_grid(selected_map_for_vario, x_coords_m, y_coords_m)
+    h = np.linspace(0, 10000, 250)
     if sld_slope.value == "Gaussian":
         gamma = sld_nugget.value + sld_sill.value * (1 - np.exp(-(h**2) / ((sld_range.value / 1.732) ** 2)))
     elif sld_slope.value == "Exponential":
@@ -2227,30 +2629,64 @@ def plot_bottom_left_variogram(*_args):
         )
 
     df = pd.DataFrame({"Distance": h, "Semivariance": gamma})
-    curve = df.hvplot.line(x="Distance", y="Semivariance", color="teal", line_width=2)
+    curve = df.hvplot.line(x="Distance", y="Semivariance", color="teal", line_width=2, label="Fitted model")
+    empirical = hv.Scatter([])
+    if not empirical_df.empty:
+        empirical = hv.Scatter(empirical_df, kdims=["lag"], vdims=["gamma", "pairs"], label="Experimental").opts(color="orange", size=6, alpha=0.9)
+
+    norm_var_val = float(np.nanvar(selected_map_for_vario)) if np.isfinite(selected_map_for_vario).any() else float("nan")
+    norm_std_val = float(np.nanstd(selected_map_for_vario)) if np.isfinite(selected_map_for_vario).any() else float("nan")
+    txt = hv.Text(
+        float(0.98 * np.max(h)),
+        float(np.nanmax(gamma) * 0.92),
+        f"Raw Residual Var: {raw_residual_var:.2f}\nRaw Residual Std: {raw_residual_std:.2f}\nNorm Var: {norm_var_val:.2f} | Norm Std: {norm_std_val:.2f}",
+        halign="right",
+        valign="top",
+    ).opts(
+        color="black",
+        text_font_size="9pt",
+        text_font_style="bold",
+    )
+
     sill_line = hv.HLine(sld_nugget.value + sld_sill.value).opts(color="red", line_width=1)
     range_line = hv.VLine(sld_range.value).opts(color="red", line_width=1)
 
-    return (curve * sill_line * range_line).opts(
+    return (curve * empirical * sill_line * range_line * txt).opts(
         toolbar="above",
         xlim=(0, None),
-        ylim=(0, None),
-        title="Theoretical Variogram",
+        ylim=(0, max(1.5, float(np.nanmax(gamma) * 1.25))),
+        title="Variogram (Experimental + Fitted, Normalized)",
+        show_legend=True,
+        legend_position="bottom_right",
+        legend_opts={"background_fill_alpha": 0.0, "border_line_alpha": 0.0},
     )
 
 
-@pn.depends(btn_update_depth_maps, btn_update_culm, btn_update_vario, btn_update_volumetrics, refresh_token, wells_refresh_token, chk_show_wells, rg_xy_units)
+@pn.depends(
+    btn_update_depth_maps,
+    btn_update_culm,
+    btn_update_vario,
+    btn_update_volumetrics,
+    refresh_token,
+    wells_refresh_token,
+)
 def plot_bottom_right_isoprobability(*_args):
     logger.debug("Rendering isoprobability map")
 
-    _, depth_stack, _, _ = get_velocity_and_depth_stacks()
+    _, depth_stack, _, final_depth_map = get_velocity_and_depth_stacks()
     n_maps = depth_stack.shape[0]
 
     trap_stats = get_trap_stats(depth_stack)
     count_array = trap_stats["trap_masks"].sum(axis=0).astype(float)
     prob_array = (count_array / n_maps) * 100 if n_maps > 0 else np.zeros_like(count_array)
     if float(np.max(prob_array)) <= 0.0:
-        pn.state.notifications.warning("No isolated closures detected with current settings. Try increasing variogram range/sill or adjusting contour step.", duration=4000)
+        spill_fallback, det_mask, _ = core_get_trap_and_spill(np.asarray(final_depth_map, dtype=float), _depth_step_m())
+        if np.any(det_mask):
+            count_array = det_mask.astype(float) * float(max(n_maps, 1))
+            prob_array = det_mask.astype(float) * 100.0
+            _notify_info("No isolated stochastic closure detected; displaying deterministic closure probability proxy.", duration=4500)
+        else:
+            _notify_warning("No isolated closures detected with current settings. Try increasing variogram range/sill or adjusting contour step.", duration=4000)
 
     _, _, _, _, x_coords_m, y_coords_m = _surface_xy_bounds()
     x_coords = _xy_from_m(x_coords_m)
@@ -2267,15 +2703,18 @@ def plot_bottom_right_isoprobability(*_args):
     custom_hover = HoverTool(
         tooltips=[
             ("X, Y", "$x{0,0}, $y{0,0}"),
-            ("Probability", "@image{0.0}%"),
+            ("Probability", "@{Probability}{0.0}%"),
             ("Closure Detail", "In @ClosureCount maps of @TotalMaps this node is within isolated trap"),
         ]
     )
 
     hv_ds = hv.Dataset(ds_prob)
-    img = hv_ds.to(hv.Image, kdims=["x", "y"], vdims=["Probability", "ClosureCount", "TotalMaps"]).opts(
+    img = hv_ds.to(hv.QuadMesh, kdims=["x", "y"], vdims=["Probability", "ClosureCount", "TotalMaps"]).opts(
         cmap="rainbow",
         clim=(0, 100),
+        line_color=None,
+        line_alpha=0.0,
+        show_grid=False,
         colorbar=True,
         colorbar_opts={"title": "Probability [%]"},
         tools=[custom_hover],
@@ -2283,9 +2722,7 @@ def plot_bottom_right_isoprobability(*_args):
     contour_levels = list(np.linspace(10, 90, 9))
     contours = hv.operation.contours(img, levels=contour_levels).opts(color="black", line_width=1.0, alpha=0.85, show_legend=False)
     angle_deg = _applied_section_angle()
-    xs_line_m, ys_line_m = core_line_through_center(np.asarray(surface_state["twt"].x.values), np.asarray(surface_state["twt"].y.values), angle_deg)
-    xs_line = _xy_from_m(xs_line_m)
-    ys_line = _xy_from_m(ys_line_m)
+    xs_line, ys_line = _section_line_display_coords(angle_deg)
     section_line = hv.Curve((xs_line, ys_line)).opts(color="red", line_width=2, line_dash="dashed", alpha=0.95)
 
     overlay = img * contours * section_line
@@ -2301,11 +2738,11 @@ def plot_bottom_right_isoprobability(*_args):
                 tools=[well_hover],
             )
             well_labels = hv.Labels(wells_df, kdims=["x", "y"], vdims=["well_name"]).opts(
-                text_font_size="8pt",
+                text_font_size="9pt",
                 text_color="yellow",
                 text_align="left",
-                xoffset=8,
-                yoffset=6,
+                xoffset=10,
+                yoffset=8,
             )
             overlay = overlay * well_pts * well_labels
 
@@ -2393,6 +2830,7 @@ def _export_report(_event) -> None:
         report_export_progress.value = 5
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / f"{base_name}{extension}"
+        _notify_info(f"Exporting to {output_path} ...", duration=4000)
 
         report_export_progress.value = 20
         payload = _build_report_payload()
@@ -2407,7 +2845,10 @@ def _export_report(_event) -> None:
         )
         report_export_progress.value = 40
 
-        if extension in {".png", ".jpeg"}:
+        if extension == ".xlsx":
+            _export_qc_excel_workbook(output_path, payload, qc_bundle=qc_bundle)
+            report_export_progress.value = 100
+        elif extension in {".png", ".jpeg"}:
             fig = _build_dashboard_figure(header, payload)
             fig.savefig(output_path, dpi=300, bbox_inches="tight")
             plt.close(fig)
@@ -2444,15 +2885,16 @@ def _export_report(_event) -> None:
                     plt.close(fig_qc)
                 report_export_progress.value = 95
 
-        qc_excel_path = out_dir / f"{base_name}_QC.xlsx"
-        _export_qc_excel_workbook(qc_excel_path, payload, qc_bundle=qc_bundle)
         report_export_progress.value = 100
-        pn.state.notifications.success(f"✅ Report exported: {output_path}", duration=3500)
-        qc_export_status.object = f"✅ QC Excel exported: {qc_excel_path}"
+        _notify_success(f"Export completed: {output_path}", duration=4200)
+        if extension == ".xlsx":
+            qc_export_status.object = f"Excel exported: {output_path}"
+        else:
+            qc_export_status.object = ""
         qc_export_status.visible = True
         logger.info("Report exported: %s", output_path)
     except Exception as exc:
-        pn.state.notifications.error(f"❌ Export failed: {exc}", duration=6000)
+        _notify_error(f"Export failed: {exc}", duration=6000)
         logger.exception("Report export failed")
     finally:
         time.sleep(0.2)
@@ -2461,39 +2903,6 @@ def _export_report(_event) -> None:
 
 
 btn_export_report.on_click(_export_report)
-
-
-def _export_qc_excel(_event) -> None:
-    header = txt_report_header.value.strip() or "Structural Uncertainty Evaluation"
-    base_name = txt_report_filename.value.strip() or "structural_uncertainty_report"
-    out_dir = Path(txt_report_location.value.strip() or str(APP_DIR / "reports"))
-
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        payload = _build_report_payload()
-        velocity_stack, depth_stack_qc, avg_velocity_map_qc, final_depth_map_qc = get_velocity_and_depth_stacks()
-        trap_stats_qc = get_trap_stats(depth_stack_qc)
-        qc_bundle = _build_geostat_qc_bundle_payload(
-            velocity_stack=velocity_stack,
-            depth_stack=depth_stack_qc,
-            avg_velocity_map=avg_velocity_map_qc,
-            final_depth_map=final_depth_map_qc,
-            trap_stats=trap_stats_qc,
-        )
-
-        qc_path = out_dir / f"{base_name}_QC.xlsx"
-        _export_qc_excel_workbook(qc_path, payload, qc_bundle=qc_bundle)
-        qc_export_status.object = f"✅ QC Excel exported ({header}): {qc_path}"
-        qc_export_status.visible = True
-        pn.state.notifications.success(f"✅ QC Excel exported: {qc_path}", duration=3500)
-    except Exception as exc:
-        qc_export_status.object = f"❌ QC Excel export failed: {exc}"
-        qc_export_status.visible = True
-        pn.state.notifications.error(f"❌ QC Excel export failed: {exc}", duration=6000)
-        logger.exception("QC Excel export failed")
-
-
-btn_export_qc_excel.on_click(_export_qc_excel)
 
 
 def _export_qc_excel_workbook(
@@ -2525,6 +2934,11 @@ def _export_qc_excel_workbook(
     depth_from_av_flat = (twt_flat * av_flat) / 2000.0
 
     arr_thick, arr_area, arr_grv, arr_stooip = _volumetric_series(trap_stats)
+    selected_idx = min(max(int(sld_map_show.value) - 1, 0), velocity_stack.shape[0] - 1)
+    selected_velocity = np.asarray(velocity_stack[selected_idx], dtype=float)
+    selected_residual = selected_velocity - float(np.nanmean(selected_velocity))
+    selected_residual_std = float(np.nanstd(selected_residual)) if np.isfinite(selected_residual).any() else float("nan")
+    selected_residual_var = float(np.nanvar(selected_residual)) if np.isfinite(selected_residual).any() else float("nan")
     wells_x_m, wells_y_m, wells_v_mps = _well_arrays_internal()
     wells_names = [str(name) for name in _well_names_internal().tolist()]
     wells_cov_df = _wells_covariance_dataframe()
@@ -2551,9 +2965,9 @@ def _export_qc_excel_workbook(
             ],
             "Description": [
                 "Surface and realization values exported for audit/QC.",
-                "Depth per cell = TWT_ms × Velocity_mps / 2000.",
-                "IsoProbability_% = (TrapCount / N_Realizations) × 100.",
-                "STOOIP_MMbbls = GRV_m3 × N/G × Phi × (1-Sw) / FVF × 6.2898 / 1e6.",
+                "Depth per cell = TWT_ms * Velocity_mps / 2000.",
+                "IsoProbability_% = (TrapCount / N_Realizations) * 100.",
+                "STOOIP_MMbbls = GRV_m3 * N/G * Phi * (1-Sw) / FVF * 6.2898 / 1e6.",
                 "Internal calculations are exported in base units (m, m/s, ms, m2, m3).",
                 "Use Formula columns to compare Excel recalculation vs exported value.",
             ],
@@ -2579,6 +2993,9 @@ def _export_qc_excel_workbook(
                 "Water saturation",
                 "FVF",
                 "Section angle",
+                "Selected realization (for plots)",
+                "Selected residual std (m/s)",
+                "Selected residual var ((m/s)^2)",
                 "Wells count",
                 "Use wells as anchors",
                 "Covariance matrix condition #",
@@ -2600,6 +3017,9 @@ def _export_qc_excel_workbook(
                 float(sld_sw.value),
                 float(sld_fvf.value),
                 float(sld_section_angle.value),
+                int(selected_idx + 1),
+                selected_residual_std,
+                selected_residual_var,
                 int(len(wells_x_m)),
                 bool(chk_use_wells.value),
                 cov_condition,
@@ -2621,6 +3041,9 @@ def _export_qc_excel_workbook(
                 "fraction",
                 "-",
                 "degrees",
+                "index",
+                "computed from selected realization",
+                "computed from selected realization",
                 "count",
                 "boolean",
                 "conditioning matrix numerical stability",
@@ -2794,7 +3217,7 @@ def _export_surface_to_petrel(_event) -> None:
     try:
         from cegalprizm.pythontool import PetrelConnection
     except Exception as exc:
-        _set_petrel_export_status(f"❌ Export failed: cegalprizm unavailable ({exc})")
+        _set_petrel_export_status(f"Export failed: cegalprizm unavailable ({exc})")
         return
 
     try:
@@ -2804,7 +3227,7 @@ def _export_surface_to_petrel(_event) -> None:
         y_coords = np.asarray(twt_da.y.values, dtype=float)
 
         if len(x_coords) < 2 or len(y_coords) < 2:
-            _set_petrel_export_status("❌ Export failed: invalid surface grid axes")
+            _set_petrel_export_status("Export failed: invalid surface grid axes")
             return
 
         n_maps = int(depth_stack.shape[0])
@@ -2840,13 +3263,13 @@ def _export_surface_to_petrel(_event) -> None:
                 selected_surfaces.append((f"{prefix}_Realization_{idx + 1:03d}", np.asarray(depth_stack[idx], dtype=float).T))
 
         if not selected_surfaces:
-            _set_petrel_export_status("⚠️ Select at least one export map.")
+            _set_petrel_export_status("Select at least one export map.")
             return
 
         ptp = PetrelConnection(allow_experimental=True)
         folder = next(iter(ptp.interpretation_folders.values()), None)
         if folder is None:
-            _set_petrel_export_status("❌ Export failed: no interpretation folder available in Petrel")
+            _set_petrel_export_status("Export failed: no interpretation folder available in Petrel")
             return
 
         existing_names = {getattr(s, "petrel_name", "") for s in ptp.surfaces}
@@ -2887,22 +3310,22 @@ def _export_surface_to_petrel(_event) -> None:
 
         if failed_names and created_names:
             _set_petrel_export_status(
-                f"⚠️ Partial export: {len(created_names)} created, {len(failed_names)} failed. "
+                f"Partial export: {len(created_names)} created, {len(failed_names)} failed. "
                 f"Created: {', '.join(created_names[:5])}{' ...' if len(created_names) > 5 else ''}"
             )
             return
         if failed_names and not created_names:
             _set_petrel_export_status(
-                f"❌ Export failed for all selected surfaces ({len(failed_names)} attempted)."
+                f"Export failed for all selected surfaces ({len(failed_names)} attempted)."
             )
             return
 
         _set_petrel_export_status(
-            f"✅ Exported {len(created_names)} surface(s): "
+            f"Exported {len(created_names)} surface(s): "
             f"{', '.join(created_names[:5])}{' ...' if len(created_names) > 5 else ''}"
         )
     except Exception as exc:
-        _set_petrel_export_status(f"❌ Export failed: {exc}")
+        _set_petrel_export_status(f"Export failed: {exc}")
 
 
 btn_export_petrel_surface.on_click(_export_surface_to_petrel)
@@ -2957,9 +3380,9 @@ def wrap_plot(title: str, plot_func, area_name: str) -> pn.Column:
 
 
 main_grid = pn.Column(
-    wrap_plot("Input Time Surface (TWT)", plot_top_left_input_twt_map, "map"),
+    wrap_plot("Input Time and Depth Surfaces", plot_top_left_input_twt_map, "map"),
     wrap_plot("Structural Section (Depth Realizations)", plot_top_right_section, "section"),
-    wrap_plot("Average Velocity Map and Final Depth", plot_bottom_left_final_depth_from_av, "realization"),
+    wrap_plot("Average Velocity and Selected Realization", plot_bottom_left_final_depth_from_av, "realization"),
     wrap_plot("Isoprobability Map", plot_bottom_right_isoprobability, "iso"),
     wrap_plot("Monte Carlo Distributions", plot_third_column_volumetrics, "hists"),
     css_classes=["dashboard-grid"],
@@ -2997,19 +3420,12 @@ def create_sidebar_card(title: str, *widgets, collapsed: bool = True) -> pn.Card
 
 card_1 = create_sidebar_card(
     "Input Selection",
-    sel_surface,
-    _surface_mode_hint,
-    sld_elong_major,
-    sld_elong_minor,
-    sld_elong_rotation,
-    sld_twt_base,
-    sld_twt_amp,
-    sld_vel_base,
-    sld_vel_amp,
+    txt_input_time_surface,
+    txt_input_depth_surface,
     sld_contours,
+    sld_input_depth_contours,
     sel_cmap,
     btn_generate_surf,
-    progress_monte_carlo,
     collapsed=True,
 )
 card_wells = create_sidebar_card(
@@ -3022,21 +3438,21 @@ card_wells = create_sidebar_card(
     chk_use_wells,
     collapsed=True,
 )
-card_2 = create_sidebar_card("Trap Detection Rules", sld_c_inc, chk_eliminate, chk_close_poly, chk_depth_contour, sld_depth_contours, btn_update_culm)
+card_2 = create_sidebar_card("Trap Detection Rules", sld_c_inc, sld_depth_contours, chk_eliminate, chk_close_poly, chk_depth_contour, btn_update_culm)
 card_3 = create_sidebar_card(
     "Velocity Realizations",
     sld_n_maps,
-    sld_std_dev,
     sld_smooth,
     sld_y_range,
     sld_map_show,
     sld_section_angle,
     chk_torch_accel,
+    progress_monte_carlo,
     btn_update_depth_maps,
 )
 
 vario_pane = pn.panel(plot_bottom_left_variogram, sizing_mode="stretch_width", min_height=250)
-card_4 = create_sidebar_card("Variogram Parameters", sld_slope, sld_range, sld_sill, sld_nugget, btn_update_vario, vario_pane)
+card_4 = create_sidebar_card("Variograms", sld_slope, sld_range, sld_sill, sld_nugget, btn_update_vario, vario_pane)
 
 card_5 = create_sidebar_card("GRV and STOOIP", sld_thick_mean, sld_thick_std, sld_ntg, sld_poro, sld_sw, sld_fvf, btn_update_volumetrics)
 card_6 = create_sidebar_card(
@@ -3047,7 +3463,6 @@ card_6 = create_sidebar_card(
     sel_report_type,
     report_export_progress,
     btn_export_report,
-    btn_export_qc_excel,
     qc_export_status,
 )
 card_7 = create_sidebar_card(
@@ -3100,4 +3515,11 @@ if FAVICON_PATH.exists():
     template_kwargs["favicon"] = str(FAVICON_PATH)
 
 logger.info("Workflow aligned: deterministic TWT -> AV realizations -> depth conversion")
+logger.info("Log directory: %s", LOG_DIR)
+if TEST_MODE:
+    logger.info(
+        "Test mode active: running without launcher/constants payload is supported; fallback test surface files or imported payload surfaces will be used when available."
+    )
 pn.template.FastListTemplate(**template_kwargs).servable()
+
+# Working code!!!!! Feb 25th, 14:13

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from pathlib import Path
 import os
 import tempfile
@@ -10,7 +11,12 @@ WF_AUTHORS = "roderick.perezaltamar@omv.com"
 WF_VERSION = "v2.0"
 
 # --- Path to the App ---
-LOCAL_ROOT = Path(__file__).resolve().parent
+try:
+    LOCAL_ROOT = Path(__file__).resolve().parent
+except NameError:
+    # Fallback for Cegal Prizm runtime where __file__ is undefined
+    LOCAL_ROOT = Path(r"N:\_USER_GLOBAL\PETREL\Prizm\wf\Vienna\structuralUncertainty")
+
 ROOT_PATH = Path(os.environ.get("PRIZM_STRUCTURAL_ROOT", str(LOCAL_ROOT)))
 APP_ROOT_PATH = ROOT_PATH / "pages"
 
