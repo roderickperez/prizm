@@ -700,6 +700,16 @@ def _on_depth_contour_toggle(event) -> None:
     sld_depth_contours.visible = bool(event.new)
 
 
+def _disable_bokeh_grid(plot, _element) -> None:
+    fig = getattr(plot, "state", None)
+    if fig is None:
+        return
+    for grid in getattr(fig, "xgrid", []):
+        grid.visible = False
+    for grid in getattr(fig, "ygrid", []):
+        grid.visible = False
+
+
 def _surface_xy_bounds() -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
     x_coords = np.asarray(surface_state.get("x_coords", surface_state["twt"].x.values), dtype=float)
     y_coords = np.asarray(surface_state.get("y_coords", surface_state["twt"].y.values), dtype=float)
@@ -2464,6 +2474,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
         line_color=None,
         line_alpha=0.0,
         show_grid=False,
+        hooks=[_disable_bokeh_grid],
         colorbar=True,
         colorbar_opts={"title": f"Velocity [{rg_velocity_units.value}]"},
         title=f"Average Velocity Map (AV, {rg_velocity_units.value})",
@@ -2486,6 +2497,7 @@ def plot_bottom_left_final_depth_from_av(*_args):
         line_color=None,
         line_alpha=0.0,
         show_grid=False,
+        hooks=[_disable_bokeh_grid],
         colorbar=True,
         colorbar_opts={"title": f"Depth [{_depth_unit_label()}]"},
         title=f"Depth Realization #{selected_idx + 1} ({_depth_unit_label()})",
@@ -2715,6 +2727,7 @@ def plot_bottom_right_isoprobability(*_args):
         line_color=None,
         line_alpha=0.0,
         show_grid=False,
+        hooks=[_disable_bokeh_grid],
         colorbar=True,
         colorbar_opts={"title": "Probability [%]"},
         tools=[custom_hover],
